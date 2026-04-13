@@ -30,9 +30,12 @@ import json
 import re
 from typing import Any, Sequence
 
+import chess
+
 from .. import db
 from ..config import settings
 from ..data.wikidata import find_for_node
+from ..engine.stockfish import StockfishPool, score_to_cp
 from ..llm import get_client
 from ..llm.prompts import PROMPTS
 from .chunker import Chunk, build_chunks_for_node
@@ -237,6 +240,52 @@ async def upsert_chunks(
 # Orchestration
 # ----------------------------------------------------------------------------
 
+async def _stockfish_enrichment(fen: str) -> str:
+    """Run Stockfish on a FEN and return a human-readable eval paragraph."""
+    try:
+        board = chess.Board(fen)
+        pool = StockfishPool(size=1)
+        try:
+            infos = await pool.analyse(board, depth=30, multipv=3)
+        finally:
+            await pool.close()
+
+        if not infos:
+            return ""
+
+        lines_text = []
+        for i, info in enumerate(infos, 1):
+            pv = info.get("pv", [])
+            if not pv:
+                continue
+            score = info.get("score")
+            if score is None:
+                continue
+            pov = score.pov(chess.WHITE)
+            mate = pov.mate()
+            if mate is not None:
+                eval_str = f"M{mate}"
+            else:
+                cp = score_to_cp(pov)
+                eval_str = f"{cp/100:+.1f}"
+            san_moves = []
+            temp = board.copy()
+            for m in pv[:6]:
+                san_moves.append(temp.san(m))
+                temp.push(m)
+            lines_text.append(f"{i}. {' '.join(san_moves)} ({eval_str})")
+
+        if not lines_text:
+            return ""
+
+        return (
+            "\n\nEngine evaluation (Stockfish 17, depth 30):\n"
+            + "\n".join(lines_text)
+        )
+    except Exception:
+        return ""
+
+
 async def generate_for_node(node_id: int) -> bool:
     node = await _load_node(node_id)
     if node is None:
@@ -250,6 +299,12 @@ async def generate_for_node(node_id: int) -> bool:
         return False
 
     description, source_meta = result
+
+    # Enrich with Stockfish evaluation.
+    sf_text = await _stockfish_enrichment(node.get("fen", ""))
+    if sf_text:
+        description += sf_text
+
     metadata = await generate_metadata(node, description)
     await _write_node_description(node_id, description, metadata, source_meta)
 

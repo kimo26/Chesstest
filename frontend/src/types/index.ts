@@ -123,6 +123,105 @@ export interface GameOverPayload {
   debrief: string;
 }
 
+// ── Stockfish analysis ──────────────────────────────────────────────────
+export interface AnalysisLine {
+  pv: string[];
+  cp: number | null;
+  mate: number | null;
+  depth: number;
+}
+
+export interface AnalyseResponse {
+  fen: string;
+  lines: AnalysisLine[];
+}
+
+// ── Practice real-time events ───────────────────────────────────────────
+export interface MistakeEvent {
+  played: string;
+  best: string | null;
+  swing_cp: number;
+  eval_before_cp: number;
+  eval_after_cp: number;
+  explanation: string;
+  best_pv: string[];
+}
+
+export interface HintResponse {
+  best_uci: string | null;
+  pv: string[];
+  cp: number | null;
+  mate: number | null;
+}
+
+export interface EvalEvent {
+  cp: number | null;
+  mate: number | null;
+}
+
+// ── Insights ────────────────────────────────────────────────────────────
+export interface MoveAnalysis {
+  ply: number;
+  move_number: number;
+  move_uci: string;
+  is_user_move: boolean;
+  cp_before: number;
+  cp_after: number;
+  swing: number;
+  accuracy: number;
+  best_uci: string | null;
+}
+
+export interface GameAnalysis {
+  game_id: number;
+  user_color: string;
+  result: string;
+  played_at: string;
+  eco_code: string | null;
+  opening_name: string | null;
+  opponent_name: string | null;
+  avg_accuracy: number;
+  phases: { opening: number; middlegame: number; endgame: number };
+  blunders: number;
+  mistakes: number;
+  inaccuracies: number;
+  moves: MoveAnalysis[];
+}
+
+export interface GameSummary {
+  game_id: number;
+  date: string;
+  opponent: string | null;
+  result: string;
+  accuracy: number;
+  eco_code: string | null;
+  opening_name: string | null;
+  blunders: number;
+  mistakes: number;
+}
+
+export interface OpeningPerformance {
+  eco_code: string;
+  opening_name: string;
+  games: number;
+  win_rate: number;
+  avg_accuracy: number;
+}
+
+export interface GameInsights {
+  total_games: number;
+  avg_accuracy: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  accuracy_over_time: { date: string; accuracy: number; game_id: number }[];
+  phases: { opening: number; middlegame: number; endgame: number };
+  opening_performance: OpeningPerformance[];
+  mistake_counts: { blunders: number; mistakes: number; inaccuracies: number };
+  games: GameSummary[];
+  coaching_summary: string | null;
+}
+
 // ── User & progress ─────────────────────────────────────────────────────
 export interface User {
   id: number;

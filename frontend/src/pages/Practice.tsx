@@ -1,13 +1,26 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import Chessboard from "../components/Chessboard";
+import EvalBar from "../components/EvalBar";
 import CoachChat from "../components/CoachChat";
 import { connectPracticeWS } from "../api/client";
 import { useUser } from "../hooks/useUser";
-import type { GameOverPayload, CriticalMoment } from "../types";
+import type {
+  GameOverPayload,
+  CriticalMoment,
+  MistakeEvent,
+  HintResponse,
+  EvalEvent,
+} from "../types";
 import type { Key } from "chessground/types";
 import { Chess } from "chess.js";
 
 type Phase = "setup" | "playing" | "finished";
+
+interface Arrow {
+  from: string;
+  to: string;
+  brush?: string;
+}
 
 export default function Practice() {
   const { user } = useUser();
@@ -19,12 +32,26 @@ export default function Practice() {
   const [openingMoves, setOpeningMoves] = useState("");
 
   // Game state
-  const [fen, setFen] = useState("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+  const [fen, setFen] = useState(
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+  );
   const [lastMove, setLastMove] = useState<[Key, Key] | undefined>();
   const [status, setStatus] = useState("");
   const [moveList, setMoveList] = useState<string[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const chessRef = useRef(new Chess());
+
+  // Eval bar
+  const [evalCp, setEvalCp] = useState<number | null>(0);
+  const [evalMate, setEvalMate] = useState<number | null>(null);
+
+  // Arrows (engine lines + hints)
+  const [arrows, setArrows] = useState<Arrow[]>([]);
+  const [showEngineLines, setShowEngineLines] = useState(false);
+
+  // Mistake toast
+  const [mistake, setMistake] = useState<MistakeEvent | null>(null);
+  const [mistakeVisible, setMistakeVisible] = useState(false);
 
   // Post-game
   const [result, setResult] = useState<GameOverPayload | null>(null);
@@ -34,7 +61,12 @@ export default function Practice() {
     setPhase("playing");
     setResult(null);
     setMoveList([]);
-    setStatus(`Playing vs ${opponent} (you are ${color})…`);
+    setArrows([]);
+    setMistake(null);
+    setMistakeVisible(false);
+    setEvalCp(0);
+    setEvalMate(null);
+    setStatus(`Playing vs ${opponent} (you are ${color})...`);
 
     const chess = new Chess();
     if (openingMoves.trim()) {
@@ -60,8 +92,8 @@ export default function Practice() {
 
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
+
       if (msg.type === "move") {
-        // Engine move
         const from = msg.uci.slice(0, 2);
         const to = msg.uci.slice(2, 4);
         const promo = msg.uci[4] || undefined;
@@ -69,6 +101,57 @@ export default function Practice() {
         setFen(chess.fen());
         setLastMove([from as Key, to as Key]);
         setMoveList((ml) => [...ml, msg.uci]);
+        // Clear mistake highlight on new move.
+        setMistakeVisible(false);
+        setArrows([]);
+      } else if (msg.type === "eval") {
+        const ev = msg as EvalEvent;
+        setEvalCp(ev.cp);
+        setEvalMate(ev.mate);
+      } else if (msg.type === "mistake") {
+        const m = msg as MistakeEvent;
+        setMistake(m);
+        setMistakeVisible(true);
+        // Show the best move as a blue arrow and played move as red.
+        const mistakeArrows: Arrow[] = [];
+        if (m.best) {
+          mistakeArrows.push({
+            from: m.best.slice(0, 2),
+            to: m.best.slice(2, 4),
+            brush: "blue",
+          });
+        }
+        mistakeArrows.push({
+          from: m.played.slice(0, 2),
+          to: m.played.slice(2, 4),
+          brush: "red",
+        });
+        setArrows(mistakeArrows);
+        // Auto-dismiss after 8 seconds.
+        setTimeout(() => setMistakeVisible(false), 8000);
+      } else if (msg.type === "hint") {
+        const h = msg as HintResponse;
+        if (h.best_uci) {
+          setArrows([
+            {
+              from: h.best_uci.slice(0, 2),
+              to: h.best_uci.slice(2, 4),
+              brush: "green",
+            },
+          ]);
+          // Clear hint arrows after 5 seconds.
+          setTimeout(() => setArrows([]), 5000);
+        }
+      } else if (msg.type === "takeback") {
+        // Reload from the new FEN.
+        chess.load(msg.fen);
+        setFen(msg.fen);
+        setLastMove(undefined);
+        setArrows([]);
+        setMistakeVisible(false);
+        // Remove the popped moves from our list.
+        setMoveList((ml) => ml.slice(0, ml.length - (msg.popped || 0)));
+        setStatus(`Took back ${msg.popped} half-move(s).`);
       } else if (msg.type === "game_over") {
         setPhase("finished");
         setResult(msg as GameOverPayload);
@@ -92,12 +175,23 @@ export default function Practice() {
       const uci = from + to + (promotion || "");
       ws.send(JSON.stringify({ type: "move", uci }));
       setMoveList((ml) => [...ml, uci]);
+      // Clear arrows on user move.
+      setArrows([]);
+      setMistakeVisible(false);
     },
     []
   );
 
   const resign = () => {
     wsRef.current?.send(JSON.stringify({ type: "resign" }));
+  };
+
+  const requestHint = () => {
+    wsRef.current?.send(JSON.stringify({ type: "hint" }));
+  };
+
+  const requestTakeback = () => {
+    wsRef.current?.send(JSON.stringify({ type: "takeback" }));
   };
 
   useEffect(() => {
@@ -118,7 +212,7 @@ export default function Practice() {
           <h1>Practice Game</h1>
           <p className="text-muted">
             Play against a maia-individual model fine-tuned on a specific
-            opponent's style.
+            opponent's style. Stockfish analyses your moves in real-time.
           </p>
           <div className="form-stack">
             <label>
@@ -133,7 +227,9 @@ export default function Practice() {
               Your color
               <select
                 value={color}
-                onChange={(e) => setColor(e.target.value as "white" | "black")}
+                onChange={(e) =>
+                  setColor(e.target.value as "white" | "black")
+                }
               >
                 <option value="white">White</option>
                 <option value="black">Black</option>
@@ -157,18 +253,63 @@ export default function Practice() {
       {(phase === "playing" || phase === "finished") && (
         <div className="practice__game">
           <div className="practice__board-col">
-            <Chessboard
-              fen={fen}
-              orientation={color}
-              interactive={phase === "playing"}
-              onMove={handleMove}
-              lastMove={lastMove}
-              viewOnly={phase === "finished"}
-            />
+            <div className="practice__board-with-eval">
+              <EvalBar
+                cp={evalCp}
+                mate={evalMate}
+                orientation={color}
+                height={480}
+              />
+              <Chessboard
+                fen={fen}
+                orientation={color}
+                interactive={phase === "playing"}
+                onMove={handleMove}
+                lastMove={lastMove}
+                viewOnly={phase === "finished"}
+                arrows={arrows}
+              />
+            </div>
             <div className="practice__status">{status}</div>
+
+            {/* Mistake toast */}
+            {mistakeVisible && mistake && (
+              <div className="mistake-toast">
+                <div className="mistake-toast__header">
+                  Inaccuracy ({mistake.swing_cp} cp)
+                </div>
+                <div className="mistake-toast__body">
+                  {mistake.explanation}
+                </div>
+              </div>
+            )}
+
             <div className="practice__moves">{formattedMoves}</div>
+
             {phase === "playing" && (
               <div className="btn-row">
+                <button
+                  className="btn btn--secondary practice__hint-btn"
+                  onClick={requestHint}
+                  title="Show best move as arrow"
+                >
+                  Hint
+                </button>
+                <button
+                  className="btn btn--outline practice__takeback-btn"
+                  onClick={requestTakeback}
+                  title="Take back last move pair"
+                >
+                  Take Back
+                </button>
+                <label className="practice__engine-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showEngineLines}
+                    onChange={(e) => setShowEngineLines(e.target.checked)}
+                  />
+                  Engine lines
+                </label>
                 <button className="btn btn--danger" onClick={resign}>
                   Resign
                 </button>
@@ -201,7 +342,7 @@ export default function Practice() {
               placeholder={
                 phase === "playing"
                   ? "Ask mid-game: 'What's the plan here?'"
-                  : "Ask about the game…"
+                  : "Ask about the game..."
               }
             />
 
@@ -210,19 +351,25 @@ export default function Practice() {
               <div className="practice__debrief card">
                 <h3>Debrief</h3>
                 <div className="practice__debrief-stats">
-                  <span>Result: <strong>{result.result}</strong></span>
-                  <span>Accuracy: <strong>{result.accuracy.toFixed(1)}%</strong></span>
+                  <span>
+                    Result: <strong>{result.result}</strong>
+                  </span>
+                  <span>
+                    Accuracy: <strong>{result.accuracy.toFixed(1)}%</strong>
+                  </span>
                 </div>
                 {result.critical_moments.length > 0 && (
                   <div>
                     <h4>Critical Moments</h4>
                     <ul className="practice__critical">
-                      {result.critical_moments.map((cm, i) => (
-                        <li key={i}>
-                          Move {cm.move_number}: played {cm.played}, best was{" "}
-                          {cm.best ?? "?"} (swing: {cm.eval_swing} cp)
-                        </li>
-                      ))}
+                      {result.critical_moments.map(
+                        (cm: CriticalMoment, i: number) => (
+                          <li key={i}>
+                            Move {cm.move_number}: played {cm.played}, best was{" "}
+                            {cm.best ?? "?"} (swing: {cm.eval_swing} cp)
+                          </li>
+                        )
+                      )}
                     </ul>
                   </div>
                 )}

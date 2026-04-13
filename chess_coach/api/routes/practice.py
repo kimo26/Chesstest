@@ -8,8 +8,17 @@ Message protocol (all JSON):
 
     client -> server  {"type": "move", "uci": "e2e4"}
     client -> server  {"type": "resign"}
+    client -> server  {"type": "hint"}
+    client -> server  {"type": "takeback"}
 
     server -> client  {"type": "move", "uci": "...", "fen": "..."}
+    server -> client  {"type": "eval", "cp": 42, "mate": null}
+    server -> client  {"type": "hint", "best_uci": "e2e4", "pv": [...], "cp": 42, "mate": null}
+    server -> client  {"type": "takeback", "fen": "...", "popped": 2}
+    server -> client  {"type": "mistake", "played": "...", "best": "...",
+                       "swing_cp": 150, "eval_before_cp": 50,
+                       "eval_after_cp": -100, "explanation": "...",
+                       "best_pv": [...]}
     server -> client  {"type": "game_over", "result": "win|loss|draw",
                        "debrief": "...", "accuracy": 87.4,
                        "critical_moments": [...]}
@@ -17,19 +26,22 @@ Message protocol (all JSON):
 """
 from __future__ import annotations
 
-import asyncio
 import json
-from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from ...engine.stockfish import StockfishPool
 from ...maia.game_loop import (
     PracticeGame,
+    evaluate_position,
+    evaluate_user_move,
     finish_session,
     get_engine_for_opponent,
+    get_hint,
     play_engine_move,
     play_user_move,
     start_session,
+    undo_last_pair,
 )
 
 
@@ -39,6 +51,7 @@ router = APIRouter()
 @router.websocket("/ws")
 async def practice_ws(ws: WebSocket) -> None:
     await ws.accept()
+    pool = StockfishPool(size=1)
     try:
         params = ws.query_params
         user_id = int(params.get("user_id", 0))
@@ -67,9 +80,14 @@ async def practice_ws(ws: WebSocket) -> None:
         engine = await get_engine_for_opponent(opponent)
         await start_session(game)
 
+        async def send_eval() -> None:
+            ev = await evaluate_position(game.board, pool)
+            await ws.send_json({"type": "eval", **ev})
+
         async def send_engine_move() -> None:
             mv = await play_engine_move(game, engine)
             await ws.send_json({"type": "move", "uci": mv.uci(), "fen": game.board.fen()})
+            await send_eval()
 
         # If Maia plays first, send a move before reading from the user.
         if not game.is_user_turn() and not game.board.is_game_over():
@@ -84,21 +102,47 @@ async def practice_ws(ws: WebSocket) -> None:
                 continue
 
             mtype = msg.get("type")
+
             if mtype == "move":
                 try:
-                    await play_user_move(game, msg["uci"])
+                    move = await play_user_move(game, msg["uci"])
                 except (KeyError, ValueError) as exc:
                     await ws.send_json({"type": "error", "message": str(exc)})
                     continue
+
+                # Send eval after user's move.
+                await send_eval()
+
+                # Check for mistakes in real-time.
+                mistake = await evaluate_user_move(game, pool, move)
+                if mistake:
+                    await ws.send_json({"type": "mistake", **mistake})
+
                 if game.board.is_game_over():
                     break
                 await send_engine_move()
+
+            elif mtype == "hint":
+                hint_data = await get_hint(game, pool)
+                await ws.send_json({"type": "hint", **hint_data})
+
+            elif mtype == "takeback":
+                popped = undo_last_pair(game)
+                await ws.send_json({
+                    "type": "takeback",
+                    "fen": game.board.fen(),
+                    "popped": popped,
+                })
+                if popped > 0:
+                    await send_eval()
+
             elif mtype == "resign":
                 break
+
             else:
                 await ws.send_json({"type": "error", "message": f"unknown type {mtype}"})
 
-        result = await finish_session(game)
+        result = await finish_session(game, pool=pool)
         await ws.send_json({"type": "game_over", **result})
         await ws.close()
 
@@ -109,3 +153,5 @@ async def practice_ws(ws: WebSocket) -> None:
             await ws.send_json({"type": "error", "message": str(exc)})
         finally:
             await ws.close()
+    finally:
+        await pool.close()

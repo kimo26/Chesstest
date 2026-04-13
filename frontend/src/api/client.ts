@@ -1,6 +1,9 @@
 import type {
+  AnalyseResponse,
   ChatResponse,
   Flashcard,
+  GameAnalysis,
+  GameInsights,
   GameOverPayload,
   OpeningNode,
   Puzzle,
@@ -139,6 +142,39 @@ export const trainingStatus = (opponent: string) =>
   request<{ status: string; error?: string }>(
     `/training/maia-individual/${encodeURIComponent(opponent)}`
   );
+
+// ── Stockfish analysis ──────────────────────────────────────────────
+export function analyse(body: {
+  fen: string;
+  depth?: number;
+  multipv?: number;
+  nodes?: number;
+}) {
+  return request<AnalyseResponse>("/analyse", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ── Insights ────────────────────────────────────────────────────────
+export const getInsights = (userId: number, monthsBack = 12) =>
+  request<GameInsights>(
+    `/insights/${userId}?months_back=${monthsBack}`
+  );
+
+export const analyseAllGames = (userId: number) =>
+  request<{ status: string; message: string }>(
+    `/insights/${userId}/analyse-all`,
+    { method: "POST" }
+  );
+
+export const getGameAnalysis = (userId: number, gameId: number) =>
+  request<GameAnalysis>(`/insights/${userId}/game/${gameId}`);
+
+export const getCoachingSummary = (userId: number) =>
+  request<{ summary: string }>(`/insights/${userId}/coaching-summary`, {
+    method: "POST",
+  });
 
 // ── Practice WebSocket ───────────────────────────────────────────────────
 export function connectPracticeWS(params: {

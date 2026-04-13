@@ -823,3 +823,243 @@ label > select {
   .dashboard__stats { flex-wrap: wrap; }
   .stat-card { min-width: 100px; padding: 12px; }
 }
+
+/* ── Eval Bar ──────────────────────────────────────────────────────── */
+.eval-bar {
+  position: relative;
+  width: 28px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--clr-border);
+  flex-shrink: 0;
+}
+.eval-bar__white {
+  background: #f0f0f0;
+  transition: height 0.3s ease;
+}
+.eval-bar__black {
+  background: #2c2c2c;
+  transition: height 0.3s ease;
+}
+.eval-bar__label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 0.6rem;
+  font-weight: 700;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  white-space: nowrap;
+}
+.eval-bar__label--dark { color: #333; }
+.eval-bar__label--light { color: #eee; }
+
+/* ── Board + eval layout ───────────────────────────────────────────── */
+.practice__board-with-eval,
+.openings__board-with-eval {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+/* ── Mistake Toast ─────────────────────────────────────────────────── */
+.mistake-toast {
+  background: var(--clr-surface);
+  border: 2px solid #e74c3c;
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin: 8px 0;
+  animation: slideIn 0.3s ease;
+}
+.mistake-toast__header {
+  color: #e74c3c;
+  font-weight: 700;
+  font-size: 0.9rem;
+  margin-bottom: 4px;
+}
+.mistake-toast__body {
+  font-size: 0.85rem;
+  color: var(--clr-text-secondary);
+  line-height: 1.4;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Practice enhancements ─────────────────────────────────────────── */
+.practice__hint-btn { min-width: 70px; }
+.practice__takeback-btn { min-width: 90px; }
+.practice__engine-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--clr-text-secondary);
+  cursor: pointer;
+}
+.practice__engine-toggle input { cursor: pointer; }
+
+/* ── Openings engine lines ─────────────────────────────────────────── */
+.openings__engine-lines {
+  margin-top: 8px;
+  background: var(--clr-surface);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 0.85rem;
+}
+.openings__engine-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.openings__arrow-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  color: var(--clr-text-secondary);
+}
+.openings__engine-line {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 2px 0;
+  font-family: var(--font-mono);
+}
+.openings__engine-eval {
+  font-weight: 700;
+  min-width: 48px;
+}
+.openings__engine-pv {
+  color: var(--clr-text-secondary);
+  font-size: 0.8rem;
+}
+
+/* ── Insights Page ─────────────────────────────────────────────────── */
+.insights__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.insights__header h1 { margin: 0; }
+
+.insights__coaching-summary {
+  margin-bottom: 20px;
+  line-height: 1.6;
+}
+
+.insights__grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+.insights__stat-card {
+  text-align: center;
+}
+.insights__stat-card h3 {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  color: var(--clr-text-secondary);
+}
+.insights__big-number {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--clr-accent);
+}
+
+.insights__chart-card {
+  grid-column: span 2;
+}
+.insights__chart-card.insights__chart-wide {
+  grid-column: 1 / -1;
+}
+
+.insights__mistake-counts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.85rem;
+}
+.insights__blunder { color: #e74c3c; font-weight: 600; }
+.insights__mistake { color: #e67e22; font-weight: 600; }
+.insights__inaccuracy { color: #f1c40f; }
+
+/* Game list */
+.insights__game-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+.insights__game-item {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--clr-border);
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.15s;
+}
+.insights__game-item:hover {
+  background: var(--clr-surface-hover);
+}
+.insights__game-item--selected {
+  background: var(--clr-surface-hover);
+  border-left: 3px solid var(--clr-accent);
+}
+.insights__game-date {
+  color: var(--clr-text-secondary);
+  min-width: 80px;
+}
+.insights__game-opponent {
+  font-weight: 500;
+  min-width: 120px;
+}
+.insights__game-result {
+  font-weight: 700;
+  min-width: 50px;
+}
+.insights__game-result--win { color: #27ae60; }
+.insights__game-result--draw { color: #95a5a6; }
+.insights__game-result--loss { color: #e74c3c; }
+.insights__game-accuracy {
+  font-weight: 600;
+  min-width: 40px;
+}
+
+/* Game detail drill-down */
+.insights__game-detail { margin-top: 12px; }
+.insights__game-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+  font-size: 0.9rem;
+}
+.insights__move-table {
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+.insights__row--blunder { background: rgba(231, 76, 60, 0.15); }
+.insights__row--mistake { background: rgba(230, 126, 34, 0.12); }
+.insights__row--inaccuracy { background: rgba(241, 196, 15, 0.08); }
+
+/* Responsive for insights */
+@media (max-width: 1100px) {
+  .insights__grid { grid-template-columns: repeat(2, 1fr); }
+  .insights__chart-card { grid-column: span 1; }
+  .insights__chart-card.insights__chart-wide { grid-column: 1 / -1; }
+}
+@media (max-width: 700px) {
+  .insights__grid { grid-template-columns: 1fr; }
+  .insights__chart-card { grid-column: span 1; }
+  .insights__header { flex-direction: column; align-items: flex-start; }
+}

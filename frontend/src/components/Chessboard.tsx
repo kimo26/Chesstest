@@ -3,7 +3,19 @@ import { Chessground } from "chessground";
 import type { Api } from "chessground/api";
 import type { Config } from "chessground/config";
 import type { Key, Color } from "chessground/types";
+import type { DrawShape } from "chessground/draw";
 import { Chess, type Square } from "chess.js";
+
+interface Arrow {
+  from: string;
+  to: string;
+  brush?: string;
+}
+
+interface Highlight {
+  square: string;
+  brush?: string;
+}
 
 interface Props {
   fen?: string;
@@ -13,6 +25,8 @@ interface Props {
   lastMove?: [Key, Key];
   viewOnly?: boolean;
   highlight?: Key[];
+  arrows?: Arrow[];
+  highlights?: Highlight[];
   width?: number;
   height?: number;
 }
@@ -25,6 +39,8 @@ export default function Chessboard({
   lastMove,
   viewOnly = false,
   highlight,
+  arrows = [],
+  highlights = [],
   width = 480,
   height = 480,
 }: Props) {
@@ -45,6 +61,25 @@ export default function Chessboard({
     return dests;
   }, [viewOnly]);
 
+  // Build drawable shapes from arrows and highlights props.
+  const buildAutoShapes = useCallback((): DrawShape[] => {
+    const shapes: DrawShape[] = [];
+    for (const arrow of arrows) {
+      shapes.push({
+        orig: arrow.from as Key,
+        dest: arrow.to as Key,
+        brush: arrow.brush || "green",
+      });
+    }
+    for (const hl of highlights) {
+      shapes.push({
+        orig: hl.square as Key,
+        brush: hl.brush || "red",
+      });
+    }
+    return shapes;
+  }, [arrows, highlights]);
+
   useEffect(() => {
     if (!boardRef.current) return;
     const config: Config = {
@@ -60,6 +95,10 @@ export default function Chessboard({
       highlight: { lastMove: true, check: true },
       animation: { enabled: true, duration: 150 },
       draggable: { enabled: interactive && !viewOnly },
+      drawable: {
+        enabled: true,
+        autoShapes: buildAutoShapes(),
+      },
       events: {
         move: (orig, dest) => {
           const chess = chessRef.current;
@@ -88,7 +127,7 @@ export default function Chessboard({
     } else {
       apiRef.current = Chessground(boardRef.current, config);
     }
-  }, [fen, orientation, interactive, viewOnly, lastMove, onMove, toDests]);
+  }, [fen, orientation, interactive, viewOnly, lastMove, onMove, toDests, buildAutoShapes]);
 
   // Keep internal chess in sync when fen changes externally
   useEffect(() => {
@@ -99,6 +138,13 @@ export default function Chessboard({
       movable: { dests: toDests() },
     });
   }, [fen, toDests]);
+
+  // Update arrows/highlights when they change.
+  useEffect(() => {
+    apiRef.current?.set({
+      drawable: { autoShapes: buildAutoShapes() },
+    });
+  }, [buildAutoShapes]);
 
   useEffect(() => {
     return () => {

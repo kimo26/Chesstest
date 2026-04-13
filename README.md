@@ -1,99 +1,539 @@
 # Chess Coach — Local, Personalized Openings Trainer
 
-A fully local chess openings coach targeting a single RTX 5090 workstation.
-Every LLM call goes through **Ollama**, and practice games are played by
-**maia-individual** networks fine-tuned on each of your actual opponents'
-Chess.com game histories and served through **lc0** over UCI.
+A fully local chess coaching application targeting a single RTX 5090 workstation. Every LLM call goes through **Ollama**, practice games are played by **maia-individual** networks fine-tuned on each of your actual opponents' Chess.com game histories and served through **lc0** over UCI, and **Stockfish 17** provides real-time analysis, evaluation, and mistake detection.
 
-## What it does
+---
 
-1. **Data** — crawls the Lichess opening explorer, merges the `lichess-org/chess-openings`
-   ECO TSV, and imports your (and your opponents') Chess.com game histories.
-2. **RAG** — generates opening descriptions with a local LLM, chunks them at
-   family / variation / position levels, embeds with `bge-m3` via Ollama,
-   stores everything in PostgreSQL (pgvector + tsvector), and retrieves with
-   BM25 + dense hybrid search fused via RRF.
-3. **Puzzles** — Stockfish 17 scans your games for eval-swing blunders and
-   extracts tactical puzzles; the LLM writes hints and explanations. Puzzle
-   difficulty is tracked with Glicko-2.
-4. **Flashcards** — FSRS v6 scheduler drives move/concept/plan/trap cards
-   generated from opening theory by the local LLM.
-5. **Practice** — plays full games against `maia-individual` weights
-   specifically fine-tuned on a single opponent's games, served via lc0/UCI.
-   After the game, Stockfish analyses it and the LLM writes a debrief.
-6. **Weakness loop** — a background worker polls Chess.com, updates per-opening
-   weakness scores, and generates targeted new puzzles and flashcards.
+## Architecture Overview
+
+```
+                  +-----------+
+                  |  Browser  |  (React + chessground)
+                  +-----+-----+
+                        |  HTTP / WebSocket
+                  +-----v-----+
+                  |  FastAPI   |  (uvicorn, async)
+                  +-----+-----+
+                        |
+         +--------------+--------------+
+         |              |              |
+   +-----v----+  +-----v----+  +------v-----+
+   | Ollama   |  | Stockfish|  | lc0 (Maia) |
+   | (LLM +   |  | 17 NNUE  |  | individual |
+   | Embeddings) | (analysis)|  | (practice) |
+   +-----+----+  +-----+----+  +------+-----+
+         |              |              |
+   +-----v--------------v--------------v-----+
+   |           PostgreSQL 16                  |
+   |  pgvector (HNSW) + ltree + pg_trgm      |
+   |  + wiki_openings + game_analyses         |
+   +------------------------------------------+
+```
+
+## Features
+
+### Opening Knowledge Base
+- **Opening tree** crawled from the Lichess opening explorer with ECO codes from `lichess-org/chess-openings`
+- **Wikipedia-sourced descriptions** fetched via Wikidata SPARQL + MediaWiki Extracts API (no LLM hallucination for facts)
+- **Stockfish-enriched RAG** — each opening node includes engine evaluations (depth 30, multipv 3) appended to the knowledge base
+- **Broader knowledge base** — ingests Wikibooks Chess (strategy, endgames, tactics, middlegame chapters), Lichess puzzle database, and annotated PGN files
+- **Hybrid retrieval** — BM25 (tsvector) + dense (pgvector HNSW cosine) fused with Reciprocal Rank Fusion (RRF)
+- **Graph expansion** — automatically includes parent/child opening nodes for hierarchical context
+
+### Practice Games
+- **Maia-individual** — fine-tunes per-opponent neural network weights so the engine plays like a specific Chess.com user
+- **Repertoire biasing** — weights the engine's move probabilities toward the opponent's actual opening choices
+- **Real-time Stockfish evaluation** — eval bar updated after every move via WebSocket
+- **Mistake detection** — Stockfish detects inaccuracies (>=100cp swing) and sends real-time alerts with AI coach explanations
+- **Hint button** — shows the best move as a green arrow on the board
+- **Take-back button** — undoes the last move pair (your move + engine's response)
+- **Engine arrows** — configurable display of engine analysis lines on the board
+- **Post-game debrief** — Stockfish accuracy analysis + LLM-generated debrief grounded in RAG passages
+
+### Opening Explorer
+- Search and browse the full opening tree
+- **Stockfish analysis** — analyse any position with configurable depth and multipv, displayed as arrows on the board
+- Engine evaluation displayed with top 3 lines
+- Win rate statistics from Lichess explorer data
+- Wikipedia-sourced descriptions with themes, plans, and key squares
+- Generate FSRS flashcards from any opening
+
+### Puzzles
+- Auto-extracted from your games where Stockfish finds eval-swing blunders (200cp threshold)
+- Import from the **Lichess puzzle database** (50,000+ rated community puzzles)
+- **Glicko-2 rating system** — both player and puzzle ratings update after each attempt
+- Hints and explanations generated by the local LLM
+
+### Flashcards
+- **FSRS v6** spaced repetition scheduler
+- Card types: move quiz, concept, plan, trap, transposition
+- Generated by the LLM from opening descriptions (grounded in Wikipedia text)
+- Review sessions with due-date ordering
+
+### Game Insights (NEW)
+- **Retroactive analysis** — batch-analyse all imported games with Stockfish
+- **Per-move accuracy** — centipawn loss, accuracy percentage, blunder/mistake/inaccuracy classification
+- **Phase breakdown** — separate accuracy for opening (ply 0-20), middlegame (20-60), endgame (60+)
+- **Accuracy over time** — line chart showing improvement trajectory
+- **Opening performance** — table of each opening with games, win rate, and average accuracy
+- **W/D/L pie chart** and overall statistics
+- **Game drill-down** — click any game to see move-by-move analysis with highlighted blunders
+- **AI coaching summary** — LLM-generated personalized improvement advice based on aggregated statistics
+
+### Coach Chat
+- RAG-powered Q&A with the local LLM
+- Context-aware — knows the current board position (FEN)
+- Cites retrieved passages with `[#n]` tags
+- Available on every page (practice, explorer, puzzles, standalone)
+- Conversation persistence in PostgreSQL
+
+### Progress Tracking
+- Puzzle rating trend chart
+- Opening weakness breakdown with visual scoring
+- Chess.com game import with weakness recomputation
+- Maia-individual training management
+
+---
 
 ## Stack
 
-| Layer | Choice |
+| Layer | Technology |
 | --- | --- |
-| DB | PostgreSQL 16 + pgvector + ltree + pg_trgm |
-| Vector index | HNSW (1024 dims, cosine) |
+| Database | PostgreSQL 16 + pgvector + ltree + pg_trgm |
+| Vector index | HNSW (1024 dims, cosine distance) |
 | Embeddings | `bge-m3` via Ollama |
 | Generation LLM | `qwen2.5:32b-instruct` via Ollama (configurable) |
+| Fast LLM | `qwen2.5:14b-instruct` via Ollama (for hints, mistakes) |
 | Chess engine (analysis) | Stockfish 17 NNUE |
-| Chess engine (practice) | lc0 loading `maia-individual` per-opponent weights |
-| Spaced repetition | `fsrs` (v6) |
-| Chess logic | `python-chess` |
+| Chess engine (practice) | lc0 loading maia-individual per-opponent weights |
+| Spaced repetition | FSRS v6 |
+| Puzzle rating | Glicko-2 (inline implementation) |
+| Chess logic | python-chess |
 | API | FastAPI + WebSockets |
-| Queue | Redis + Dramatiq |
+| Cache / queue | Redis |
+| Frontend | React 18 + TypeScript + Vite |
+| Board | chessground (Lichess board library) with drawable API |
+| Charts | Recharts |
+| Move validation | chess.js (client-side) |
 
-## Recommended Ollama models for an RTX 5090 (32 GB VRAM)
+---
+
+## Prerequisites
+
+### Hardware
+- **GPU**: NVIDIA RTX 5090 (32 GB VRAM) or equivalent. The 32B model uses ~20 GB VRAM; Stockfish and lc0 run on CPU.
+- **RAM**: 32 GB+ recommended (Stockfish hash tables + PostgreSQL)
+- **Storage**: ~10 GB for models, database, and game data
+
+### Software
+
+1. **PostgreSQL 16** with extensions:
+   ```bash
+   # Install pgvector
+   git clone https://github.com/pgvector/pgvector.git
+   cd pgvector && make && sudo make install
+
+   # ltree and pg_trgm are built-in — just CREATE EXTENSION
+   ```
+
+2. **Redis** (for caching and background tasks):
+   ```bash
+   sudo apt install redis-server
+   ```
+
+3. **Ollama** (local LLM inference):
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ollama serve &
+   ```
+
+4. **Stockfish 17**:
+   ```bash
+   # Download from https://stockfishchess.org/download/
+   # Or build from source:
+   git clone https://github.com/official-stockfish/Stockfish.git
+   cd Stockfish/src && make -j profile-build ARCH=x86-64-avx512
+   sudo cp stockfish /usr/local/bin/
+   ```
+
+5. **lc0** (Leela Chess Zero, for maia-individual):
+   ```bash
+   # Install from https://lczero.org/play/download/
+   # Or build from source:
+   git clone https://github.com/LeelaChessZero/lc0.git
+   cd lc0 && ./build.sh
+   sudo cp build/release/lc0 /usr/local/bin/
+   ```
+
+6. **Maia-1 base weights** (for fine-tuning):
+   ```bash
+   mkdir -p models
+   # Download maia-1900.pb.gz from https://github.com/CSSLab/maia-chess/releases
+   # Place in models/maia-1900.pb.gz
+   ```
+
+7. **Python 3.11+** with uv (recommended):
+   ```bash
+   pip install uv
+   ```
+
+8. **Node.js 18+** (for the frontend):
+   ```bash
+   curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+   sudo apt install nodejs
+   ```
+
+---
+
+## Setup Guide
+
+### 1. Clone and install
 
 ```bash
-ollama pull qwen2.5:32b-instruct          # primary generation (Q4_K_M ~20 GB)
-ollama pull qwen2.5:14b-instruct          # fast path for flashcards / hints
-ollama pull bge-m3                        # 1024-dim multilingual embeddings
-```
+git clone https://github.com/kimo26/chesstest.git
+cd chesstest
 
-Anything in `settings.py` can be swapped — e.g. `llama3.3:70b-instruct-q4_K_M`,
-`gemma3:27b`, or `deepseek-r1:32b` — without touching the rest of the code.
-
-## Quickstart
-
-```bash
-# 1. Infra
-docker compose up -d postgres redis
-psql $DATABASE_URL -f sql/001_schema.sql
-
-# 2. Python env
+# Python backend
 uv venv && source .venv/bin/activate
 uv pip install -e .
 
-# 3. Local services
-ollama serve &                    # on :11434
-lc0 --weights=<base_maia.pb.gz>   # only needed if you skip practice
-
-# 4. Seed data
-python -m chess_coach.scripts.load_eco
-python -m chess_coach.scripts.crawl_lichess --max-depth 12
-python -m chess_coach.scripts.generate_descriptions
-python -m chess_coach.scripts.import_games --user <your_chess_com_handle>
-
-# 5. Fine-tune a maia on an opponent
-python -m chess_coach.scripts.train_maia_individual \
-    --opponent <their_chess_com_handle> \
-    --base-weights models/maia-1900.pb.gz
-
-# 6. Run the app
-uvicorn chess_coach.api.main:app --reload
+# Frontend
+cd frontend && npm install && cd ..
 ```
 
-## Repo layout
+### 2. Environment configuration
+
+Create a `.env` file in the project root:
+
+```bash
+# Database
+DATABASE_URL=postgresql://chess:chess@localhost:5432/chess_coach
+
+# Redis
+REDIS_URL=redis://localhost:6379/0
+
+# Ollama
+OLLAMA_URL=http://localhost:11434
+OLLAMA_GEN_MODEL=qwen2.5:32b-instruct
+OLLAMA_FAST_MODEL=qwen2.5:14b-instruct
+OLLAMA_EMBED_MODEL=bge-m3
+
+# Engines
+STOCKFISH_PATH=/usr/local/bin/stockfish
+STOCKFISH_THREADS=8
+STOCKFISH_HASH_MB=2048
+STOCKFISH_ANALYSIS_DEPTH=22
+STOCKFISH_ANALYSIS_MULTIPV=3
+STOCKFISH_MISTAKE_THRESHOLD_CP=100
+
+LC0_PATH=/usr/local/bin/lc0
+MAIA_BASE_WEIGHTS=./models/maia-1900.pb.gz
+MAIA_WEIGHTS_DIR=./models/maia_individual
+```
+
+All settings have sensible defaults and can be overridden via environment variables. See `chess_coach/config.py` for the full list.
+
+### 3. Pull Ollama models
+
+```bash
+ollama pull qwen2.5:32b-instruct   # primary generation (~20 GB VRAM)
+ollama pull qwen2.5:14b-instruct   # fast path for hints/mistakes (~8 GB)
+ollama pull bge-m3                  # 1024-dim embeddings
+```
+
+You can swap models by changing the env vars. Compatible alternatives include `llama3.3:70b-instruct-q4_K_M`, `gemma3:27b`, `deepseek-r1:32b`, or any Ollama-compatible model.
+
+### 4. Database setup
+
+```bash
+# Start PostgreSQL and Redis
+docker compose up -d postgres redis
+
+# Create the schema
+psql $DATABASE_URL -f sql/001_schema.sql
+psql $DATABASE_URL -f sql/002_knowledge_base.sql
+```
+
+### 5. Data pipelines
+
+Run these in order to populate the knowledge base:
+
+```bash
+# Load ECO codes from lichess-org/chess-openings
+python -m chess_coach.scripts.load_eco
+
+# Crawl the Lichess opening explorer (BFS, configurable depth)
+python -m chess_coach.scripts.crawl_lichess --max-depth 12
+
+# Fetch Wikipedia descriptions for all openings via Wikidata SPARQL
+python -m chess_coach.scripts.refresh_wiki
+
+# Generate descriptions + Stockfish enrichment + chunk + embed
+python -m chess_coach.scripts.generate_descriptions
+
+# Import your Chess.com games
+python -m chess_coach.scripts.import_games --user YOUR_CHESSCOM_USERNAME
+
+# Extract puzzles from your games
+python -m chess_coach.scripts.extract_puzzles --user-id 1
+
+# Compute opening weaknesses
+python -m chess_coach.scripts.recompute_weaknesses --user-id 1
+```
+
+#### Broader knowledge base (optional but recommended)
+
+```bash
+# Ingest Wikibooks Chess theory (strategy, tactics, endgames)
+python -m chess_coach.scripts.ingest_knowledge wikibooks
+
+# Import Lichess puzzle database (download + decompress first)
+# wget https://database.lichess.org/lichess_db_puzzle.csv.zst
+# zstd -d lichess_db_puzzle.csv.zst
+python -m chess_coach.scripts.ingest_knowledge lichess-puzzles /path/to/lichess_db_puzzle.csv
+
+# Import annotated PGN files
+python -m chess_coach.scripts.ingest_knowledge annotated-pgn /path/to/annotated_games.pgn
+```
+
+### 6. Maia-individual training
+
+Fine-tune a Maia network on a specific opponent's play style:
+
+```bash
+# Import the opponent's games
+python -m chess_coach.scripts.import_games --opponent OPPONENT_USERNAME
+
+# Fine-tune (clones CSSLab/maia-chess repo, runs training)
+python -m chess_coach.scripts.train_maia_individual \
+    --opponent OPPONENT_USERNAME \
+    --base-weights models/maia-1900.pb.gz
+```
+
+The fine-tuned weights are saved to `models/maia_individual/<opponent>.pb.gz` and automatically loaded during practice games.
+
+### 7. Run the application
+
+```bash
+# Backend (from project root)
+uvicorn chess_coach.api.main:app --reload --host 0.0.0.0 --port 8000
+
+# Frontend (from frontend/)
+cd frontend && npm run dev
+```
+
+The frontend dev server proxies API requests to `localhost:8000`. Open `http://localhost:5173` in your browser.
+
+---
+
+## Configuration Reference
+
+All settings are in `chess_coach/config.py` and loaded from environment variables or `.env`:
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | `postgresql://chess:chess@localhost:5432/chess_coach` | PostgreSQL connection string |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
+| `OLLAMA_GEN_MODEL` | `qwen2.5:32b-instruct` | Primary generation model |
+| `OLLAMA_FAST_MODEL` | `qwen2.5:14b-instruct` | Fast model for hints/mistakes |
+| `OLLAMA_EMBED_MODEL` | `bge-m3` | Embedding model (1024 dims) |
+| `OLLAMA_GEN_NUM_CTX` | `8192` | Generation context window |
+| `OLLAMA_GEN_TEMPERATURE` | `0.2` | Generation temperature |
+| `STOCKFISH_PATH` | `/usr/local/bin/stockfish` | Path to Stockfish binary |
+| `STOCKFISH_THREADS` | `8` | Stockfish CPU threads |
+| `STOCKFISH_HASH_MB` | `2048` | Stockfish hash table size (MB) |
+| `STOCKFISH_ANALYSIS_DEPTH` | `22` | Default analysis depth for API |
+| `STOCKFISH_ANALYSIS_MULTIPV` | `3` | Default number of engine lines |
+| `STOCKFISH_MISTAKE_THRESHOLD_CP` | `100` | Centipawn swing to flag as mistake |
+| `LC0_PATH` | `/usr/local/bin/lc0` | Path to lc0 binary |
+| `LC0_NODES` | `1` | lc0 search nodes (Maia = 1 node) |
+| `MAIA_BASE_WEIGHTS` | `./models/maia-1900.pb.gz` | Base Maia-1 weights for fine-tuning |
+| `MAIA_WEIGHTS_DIR` | `./models/maia_individual` | Directory for fine-tuned weights |
+| `RAG_TOP_K_DENSE` | `20` | Dense search candidates |
+| `RAG_TOP_K_BM25` | `20` | BM25 search candidates |
+| `RAG_RRF_K` | `60` | RRF fusion constant |
+| `RAG_FINAL_TOP_K` | `6` | Final passages sent to LLM |
+
+---
+
+## API Reference
+
+### REST Endpoints
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/health` | Health check |
+| `POST` | `/api/chat` | RAG-powered chat Q&A |
+| `POST` | `/api/analyse` | Stockfish position analysis |
+| `GET` | `/api/openings/{id}` | Get opening node with children |
+| `GET` | `/api/openings/search/by-name?q=...` | Search openings by name/ECO |
+| `GET` | `/api/openings/by-fen/{fen}` | Look up opening by FEN |
+| `GET` | `/api/puzzles/next/{user_id}` | Get next rated puzzle |
+| `POST` | `/api/puzzles/{id}/attempt` | Submit puzzle attempt (Glicko-2 update) |
+| `GET` | `/api/flashcards/due?user_id=...` | Get due flashcards (FSRS) |
+| `POST` | `/api/flashcards/generate` | Generate flashcards from opening |
+| `POST` | `/api/flashcards/{id}/review` | Review a flashcard |
+| `POST` | `/api/games/import` | Import Chess.com games |
+| `POST` | `/api/games/import-opponent` | Import opponent's games |
+| `GET` | `/api/games/weaknesses/{user_id}` | Get weakness breakdown |
+| `POST` | `/api/games/weaknesses/{user_id}/recompute` | Recompute weaknesses |
+| `GET` | `/api/insights/{user_id}` | Get aggregated game insights |
+| `POST` | `/api/insights/{user_id}/analyse-all` | Batch-analyse all games |
+| `GET` | `/api/insights/{user_id}/game/{game_id}` | Per-game move analysis |
+| `POST` | `/api/insights/{user_id}/coaching-summary` | LLM coaching summary |
+| `POST` | `/api/training/maia-individual` | Start Maia fine-tuning |
+| `GET` | `/api/training/maia-individual/{opponent}` | Check training status |
+
+### WebSocket: Practice Game
+
+Connect to `ws://host/api/practice/ws?user_id=1&opponent=hikaru&user_color=white`
+
+**Client -> Server:**
+| Type | Payload | Description |
+| --- | --- | --- |
+| `move` | `{uci: "e2e4"}` | Play a move |
+| `hint` | `{}` | Request best move |
+| `takeback` | `{}` | Undo last move pair |
+| `resign` | `{}` | Resign the game |
+
+**Server -> Client:**
+| Type | Key Fields | Description |
+| --- | --- | --- |
+| `move` | `uci, fen` | Engine's move |
+| `eval` | `cp, mate` | Position evaluation (after each move) |
+| `hint` | `best_uci, pv, cp, mate` | Best move + engine line |
+| `takeback` | `fen, popped` | Board state after undo |
+| `mistake` | `played, best, swing_cp, explanation, best_pv` | Mistake detected with AI explanation |
+| `game_over` | `result, accuracy, critical_moments, debrief` | Game finished |
+| `error` | `message` | Error message |
+
+---
+
+## Frontend Pages
+
+| Route | Page | Description |
+| --- | --- | --- |
+| `/` | Dashboard | Overview stats, weak openings, quick start links |
+| `/openings` | Openings Explorer | Search/browse tree, board, Stockfish analysis, arrows, coach chat |
+| `/practice` | Practice | Play vs Maia, eval bar, hint/takeback, mistake highlights, live coach |
+| `/puzzles` | Puzzles | Glicko-2 rated puzzles with hints and explanations |
+| `/flashcards` | Flashcards | FSRS spaced repetition review sessions |
+| `/chat` | Coach Chat | Standalone RAG Q&A with board position context |
+| `/insights` | Insights | Retroactive game analysis, charts, stats, coaching summary |
+| `/progress` | Progress | Puzzle rating, weakness charts, import/training controls |
+
+---
+
+## Repo Layout
 
 ```
 chess_coach/
-  config.py              settings loaded from env
-  db.py                  async pg pool + helpers
-  llm/                   Ollama chat + embedding clients, prompt templates
-  data/                  Lichess explorer crawler, Chess.com importer, ECO loader
-  rag/                   chunker, embedder, hybrid retriever, reranker, generator
-  engine/                Stockfish wrapper + puzzle extractor
-  maia/                  maia-individual fine-tuning pipeline + lc0 UCI wrapper
-  fsrs_cards/            FSRS v6 scheduler + LLM card generator
-  analysis/              weakness scoring + post-game debrief
-  api/                   FastAPI app, routes, WebSocket practice loop
-  scripts/               CLI entry points
-sql/001_schema.sql       full database schema
+  config.py                     Settings loaded from env / .env
+  db.py                         Async PostgreSQL pool + pgvector helpers
+  llm/
+    ollama_client.py            Ollama HTTP wrapper (chat, embed, generate_json)
+    prompts.py                  All prompt templates (8 templates)
+  data/
+    lichess_explorer.py         BFS crawler for Lichess opening explorer
+    chesscom_importer.py        Chess.com game importer (user + opponent)
+    eco.py                      lichess-org/chess-openings TSV loader
+    wikidata.py                 Wikidata SPARQL + Wikipedia extract fetcher
+    knowledge_ingest.py         Wikibooks, Lichess puzzles, annotated PGN ingestion
+  rag/
+    chunker.py                  Hierarchical chunking (family/variation/position)
+    retriever.py                Hybrid BM25+dense search with RRF fusion
+    generator.py                Wikipedia-sourced descriptions + Stockfish enrichment
+    chat.py                     RAG Q&A with conversation persistence
+  engine/
+    stockfish.py                StockfishPool async wrapper
+    puzzle_extractor.py         Eval-swing puzzle extraction
+  maia/
+    individual_trainer.py       Per-opponent maia fine-tuning pipeline
+    lc0_engine.py               LC0 UCI wrapper with repertoire biasing
+    game_loop.py                Practice game loop (play, hint, takeback, eval, mistake)
+  fsrs_cards/
+    scheduler.py                FSRS v6 wrapper
+    generator.py                LLM flashcard generation
+  analysis/
+    weakness.py                 Per-opening weakness scoring
+    debrief.py                  Post-game LLM debrief
+    insights.py                 Retroactive game analysis + aggregated insights
+  api/
+    main.py                     FastAPI app with lifespan
+    routes/
+      analyse.py                Stockfish analysis endpoint
+      chat.py                   RAG chat endpoint
+      flashcards.py             Flashcard CRUD + review
+      games.py                  Game import + weakness endpoints
+      insights.py               Insights + coaching summary endpoints
+      openings.py               Opening tree browsing
+      practice.py               WebSocket practice game handler
+      puzzles.py                Puzzle serving with Glicko-2
+      training.py               Maia training management
+  scripts/
+    load_eco.py                 Import ECO codes
+    crawl_lichess.py            Crawl Lichess explorer
+    refresh_wiki.py             Fetch Wikipedia articles via Wikidata
+    generate_descriptions.py    Generate + embed opening descriptions
+    import_games.py             Import Chess.com games
+    extract_puzzles.py          Extract puzzles from games
+    train_maia_individual.py    Fine-tune Maia on opponent
+    recompute_weaknesses.py     Recompute weakness scores
+    create_user.py              Create a user record
+    ingest_knowledge.py         Broader knowledge base ingestion
+
+frontend/
+  src/
+    api/client.ts               Typed API client for all endpoints
+    components/
+      Chessboard.tsx            chessground wrapper with drawable arrows
+      CoachChat.tsx             RAG chat component
+      EvalBar.tsx               Stockfish evaluation bar
+      Nav.tsx                   Navigation (8 links)
+      WinBar.tsx                Win/draw/loss percentage bar
+    hooks/useUser.ts            User state in localStorage
+    pages/
+      Dashboard.tsx             Stats overview, weak openings, quick start
+      OpeningsExplorer.tsx      Search + tree + board + Stockfish analysis + arrows
+      Practice.tsx              WebSocket game + eval bar + hint/takeback + mistakes
+      Puzzles.tsx               Glicko-2 puzzles with hints
+      Flashcards.tsx            FSRS review session
+      Chat.tsx                  Standalone RAG chat
+      Insights.tsx              Retroactive analysis + charts + coaching summary
+      Progress.tsx              Weakness charts, import controls, training
+    types/index.ts              All TypeScript interfaces
+    styles.css                  Full dark theme design system
+
+sql/
+  001_schema.sql                Main database schema
+  002_knowledge_base.sql        Knowledge base + game analyses extensions
+
+docker-compose.yml              PostgreSQL (pgvector) + Redis
+pyproject.toml                  Python package definition
 ```
+
+---
+
+## Troubleshooting
+
+### "Ollama connection refused"
+Make sure Ollama is running: `ollama serve &`. Check the URL in your `.env` matches (default: `http://localhost:11434`).
+
+### "Stockfish not found"
+Verify the path: `which stockfish` or set `STOCKFISH_PATH` in `.env`. Stockfish must be the command-line binary, not a GUI wrapper.
+
+### "No puzzles available"
+Run `python -m chess_coach.scripts.extract_puzzles --user-id 1` to generate puzzles from your imported games. Or import Lichess puzzles: `python -m chess_coach.scripts.ingest_knowledge lichess-puzzles /path/to/csv`.
+
+### "pgvector extension not found"
+Install pgvector from source: `git clone https://github.com/pgvector/pgvector.git && cd pgvector && make && sudo make install`. Then: `CREATE EXTENSION vector;` in psql.
+
+### "lc0 / Maia weights not found"
+Download Maia-1 weights from the CSSLab GitHub releases page. Place as `models/maia-1900.pb.gz`. Fine-tuned weights go in `models/maia_individual/`.
+
+### Frontend build errors
+Ensure Node.js 18+ is installed. Run `cd frontend && npm install && npm run dev`. The Vite dev server auto-proxies `/api` to the backend.
+
+### VRAM issues
+If you run out of VRAM, switch to a smaller model: set `OLLAMA_GEN_MODEL=qwen2.5:14b-instruct` in `.env`. The 14B model fits in ~8 GB VRAM.

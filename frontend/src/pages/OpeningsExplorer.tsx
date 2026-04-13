@@ -1,11 +1,20 @@
 import { useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import Chessboard from "../components/Chessboard";
+import EvalBar from "../components/EvalBar";
 import CoachChat from "../components/CoachChat";
 import WinBar from "../components/WinBar";
-import { getOpening, searchOpenings, generateCards } from "../api/client";
+import { getOpening, searchOpenings, generateCards, analyse } from "../api/client";
 import { useUser } from "../hooks/useUser";
-import type { OpeningNode } from "../types";
+import type { OpeningNode, AnalysisLine } from "../types";
+
+interface Arrow {
+  from: string;
+  to: string;
+  brush?: string;
+}
+
+const LINE_BRUSHES = ["green", "blue", "yellow"];
 
 export default function OpeningsExplorer() {
   const { user } = useUser();
@@ -15,12 +24,18 @@ export default function OpeningsExplorer() {
   const [results, setResults] = useState<OpeningNode[]>([]);
   const [cardsMsg, setCardsMsg] = useState("");
 
+  // Engine analysis state
+  const [engineLines, setEngineLines] = useState<AnalysisLine[]>([]);
+  const [analysing, setAnalysing] = useState(false);
+  const [showArrows, setShowArrows] = useState(true);
+
   const nodeId = params.get("id") ? Number(params.get("id")) : null;
 
   const load = useCallback(async (id: number) => {
     try {
       const data = await getOpening(id);
       setNode(data);
+      setEngineLines([]);
     } catch {
       setNode(null);
     }
@@ -48,7 +63,7 @@ export default function OpeningsExplorer() {
 
   const doGenCards = async () => {
     if (!node) return;
-    setCardsMsg("Generating…");
+    setCardsMsg("Generating...");
     try {
       const r = await generateCards(user.id, node.id, 6);
       setCardsMsg(`Created ${r.created.length} flashcards`);
@@ -56,6 +71,35 @@ export default function OpeningsExplorer() {
       setCardsMsg(`Error: ${err}`);
     }
   };
+
+  const doAnalyse = async () => {
+    if (!node) return;
+    setAnalysing(true);
+    try {
+      const r = await analyse({ fen: node.fen, depth: 22, multipv: 3 });
+      setEngineLines(r.lines);
+    } catch {
+      setEngineLines([]);
+    }
+    setAnalysing(false);
+  };
+
+  // Build arrows from engine lines.
+  const engineArrows: Arrow[] =
+    showArrows && engineLines.length > 0
+      ? engineLines
+          .filter((l) => l.pv.length > 0)
+          .map((l, i) => ({
+            from: l.pv[0].slice(0, 2),
+            to: l.pv[0].slice(2, 4),
+            brush: LINE_BRUSHES[i % LINE_BRUSHES.length],
+          }))
+      : [];
+
+  // Eval from top line.
+  const topLine = engineLines[0];
+  const evalCp = topLine?.cp ?? null;
+  const evalMate = topLine?.mate ?? null;
 
   return (
     <div className="page openings">
@@ -65,7 +109,7 @@ export default function OpeningsExplorer() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && doSearch()}
-          placeholder="Search openings (e.g. Sicilian, Najdorf, B90)…"
+          placeholder="Search openings (e.g. Sicilian, Najdorf, B90)..."
         />
         <button className="btn btn--primary" onClick={doSearch}>
           Search
@@ -75,9 +119,14 @@ export default function OpeningsExplorer() {
       {results.length > 0 && (
         <ul className="openings__results">
           {results.map((r) => (
-            <li key={r.id} onClick={() => navigate(r.id)} className="openings__result-item">
+            <li
+              key={r.id}
+              onClick={() => navigate(r.id)}
+              className="openings__result-item"
+            >
               <span className="badge">{r.eco_code}</span>{" "}
-              {r.opening_name} <span className="text-muted">depth {r.depth}</span>
+              {r.opening_name}{" "}
+              <span className="text-muted">depth {r.depth}</span>
             </li>
           ))}
         </ul>
@@ -86,8 +135,69 @@ export default function OpeningsExplorer() {
       {node && (
         <div className="openings__detail">
           <div className="openings__board-col">
-            <Chessboard fen={node.fen} viewOnly orientation="white" />
+            <div className="openings__board-with-eval">
+              {engineLines.length > 0 && (
+                <EvalBar
+                  cp={evalCp}
+                  mate={evalMate}
+                  orientation="white"
+                  height={480}
+                />
+              )}
+              <Chessboard
+                fen={node.fen}
+                viewOnly
+                orientation="white"
+                arrows={engineArrows}
+              />
+            </div>
             <div className="openings__moves">{node.move_sequence}</div>
+
+            {/* Engine analysis results */}
+            {engineLines.length > 0 && (
+              <div className="openings__engine-lines">
+                <div className="openings__engine-header">
+                  <strong>Engine Analysis</strong>
+                  <label className="openings__arrow-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showArrows}
+                      onChange={(e) => setShowArrows(e.target.checked)}
+                    />
+                    Show arrows
+                  </label>
+                </div>
+                {engineLines.map((line, i) => {
+                  const evalStr =
+                    line.mate !== null
+                      ? `M${line.mate}`
+                      : line.cp !== null
+                      ? `${line.cp > 0 ? "+" : ""}${(line.cp / 100).toFixed(1)}`
+                      : "?";
+                  return (
+                    <div key={i} className="openings__engine-line">
+                      <span
+                        className="openings__engine-eval"
+                        style={{
+                          color:
+                            LINE_BRUSHES[i % LINE_BRUSHES.length] === "green"
+                              ? "var(--clr-success)"
+                              : LINE_BRUSHES[i % LINE_BRUSHES.length] === "blue"
+                              ? "var(--clr-info)"
+                              : "var(--clr-warning)",
+                        }}
+                      >
+                        {evalStr}
+                      </span>
+                      <span className="openings__engine-pv">
+                        {line.pv.slice(0, 8).join(" ")}
+                      </span>
+                      <span className="text-muted">d{line.depth}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="openings__info-col">
@@ -168,6 +278,13 @@ export default function OpeningsExplorer() {
             )}
 
             <div className="btn-row" style={{ marginTop: 16 }}>
+              <button
+                className="btn btn--primary"
+                onClick={doAnalyse}
+                disabled={analysing}
+              >
+                {analysing ? "Analysing..." : "Analyse with Stockfish"}
+              </button>
               <button className="btn btn--secondary" onClick={doGenCards}>
                 Generate Flashcards
               </button>
@@ -177,7 +294,11 @@ export default function OpeningsExplorer() {
 
           {/* Coach available while exploring */}
           <div className="openings__chat-col">
-            <CoachChat userId={user.id} fen={node.fen} placeholder="Ask about this opening…" />
+            <CoachChat
+              userId={user.id}
+              fen={node.fen}
+              placeholder="Ask about this opening..."
+            />
           </div>
         </div>
       )}

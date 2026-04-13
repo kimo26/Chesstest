@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     rag_rrf_k: int = 60
     rag_final_top_k: int = 6
 
+    # Stockfish analysis (API endpoint)
+    stockfish_analysis_depth: int = 22
+    stockfish_analysis_multipv: int = 3
+    stockfish_mistake_threshold_cp: int = 100
+
     # Puzzle extraction
     puzzle_swing_cp: int = 200
     puzzle_second_best_gap_cp: int = 100

@@ -134,6 +134,55 @@ PROMPTS: dict[str, Prompt] = {
     ),
 
     # ------------------------------------------------------------------
+    # Real-time move mistake explanation (during practice).
+    # ------------------------------------------------------------------
+    "move_mistake": Prompt(
+        system=(
+            "You are a real-time chess coach. The student just made a "
+            "sub-optimal move during a practice game. Explain briefly (2-3 "
+            "sentences) why the move was inaccurate and what the better "
+            "alternative achieves. Be encouraging but specific — reference "
+            "concrete squares, pieces, and tactical/positional ideas. "
+            "Do not use engine notation like 'cp' or 'centipawns'."
+        ),
+        user=(
+            "Position (FEN): {fen}\n"
+            "Student played: {played_move} (eval went from {eval_before} to {eval_after})\n"
+            "Better move: {best_move}\n"
+            "Engine line after best: {best_pv}\n"
+            "Opening context: {opening_name}"
+        ),
+    ),
+
+    # ------------------------------------------------------------------
+    # Insights: coaching summary of aggregated game analysis.
+    # ------------------------------------------------------------------
+    "insight_summary": Prompt(
+        system=(
+            "You are a chess improvement coach reviewing a student's game "
+            "history statistics. Write a concise coaching summary (3-5 "
+            "paragraphs) that identifies their strongest and weakest areas, "
+            "suggests specific study priorities, and gives actionable advice. "
+            "Reference the data provided: accuracy trends, opening performance, "
+            "phase breakdowns, and common mistake types. Be encouraging but "
+            "honest about areas that need work."
+        ),
+        user=(
+            "Player: {username}\n"
+            "Games analysed: {total_games}\n"
+            "Overall accuracy: {avg_accuracy:.1f}%\n"
+            "Win/Draw/Loss: {wins}/{draws}/{losses}\n\n"
+            "Accuracy by phase:\n"
+            "  Opening: {opening_accuracy:.1f}%\n"
+            "  Middlegame: {middlegame_accuracy:.1f}%\n"
+            "  Endgame: {endgame_accuracy:.1f}%\n\n"
+            "Top 3 weakest openings:\n{weak_openings}\n\n"
+            "Common mistake types:\n{mistake_types}\n\n"
+            "Rating trend: {rating_trend}"
+        ),
+    ),
+
+    # ------------------------------------------------------------------
     # Post-game debrief.
     # ------------------------------------------------------------------
     "debrief": Prompt(

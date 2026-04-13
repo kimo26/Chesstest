@@ -18,7 +18,10 @@ import chess.pgn
 
 from .. import db
 from ..analysis.debrief import generate_debrief
+from ..config import settings
 from ..engine.stockfish import StockfishPool, score_to_cp
+from ..llm import get_client
+from ..llm.prompts import PROMPTS
 from .lc0_engine import LC0Engine, get_engine_for_opponent
 
 
@@ -95,6 +98,134 @@ async def get_position_bias(opponent: str, board: chess.Board, *, k: int = 20) -
     if total == 0:
         return {}
     return {m: c / total for m, c in counts.items()}
+
+
+def undo_last_pair(game: PracticeGame) -> int:
+    """Pop the last engine + user move pair. Returns the number of half-moves
+    actually popped (0, 1, or 2). The board and move_history are updated."""
+    popped = 0
+    for _ in range(2):
+        if game.move_history:
+            game.board.pop()
+            game.move_history.pop()
+            popped += 1
+    return popped
+
+
+async def evaluate_position(board: chess.Board, pool: StockfishPool) -> dict[str, Any]:
+    """Quick Stockfish eval of a position. Returns ``{cp, mate}``."""
+    infos = await pool.analyse(board, depth=18, multipv=1)
+    if not infos:
+        return {"cp": 0, "mate": None}
+    score = infos[0].get("score")
+    if score is None:
+        return {"cp": 0, "mate": None}
+    pov = score.pov(chess.WHITE)
+    m = pov.mate()
+    if m is not None:
+        return {"cp": None, "mate": m}
+    return {"cp": score_to_cp(pov), "mate": None}
+
+
+async def evaluate_user_move(
+    game: PracticeGame,
+    pool: StockfishPool,
+    move: chess.Move,
+) -> dict[str, Any] | None:
+    """Analyse the user's move in real-time. Returns a mistake dict if the
+    eval swing exceeds the configured threshold, otherwise ``None``.
+
+    The ``move`` must already have been pushed onto ``game.board``.
+    """
+    threshold = settings.stockfish_mistake_threshold_cp
+
+    # Board state *before* the user's move.
+    board_before = game.board.copy()
+    board_before.pop()
+
+    # Eval before the move.
+    infos_before = await pool.analyse(board_before, depth=18, multipv=1)
+    if not infos_before:
+        return None
+    best_cp = score_to_cp(infos_before[0]["score"].pov(board_before.turn))
+    best_pv = infos_before[0].get("pv", [])
+    best_move = best_pv[0] if best_pv else None
+
+    # Eval after the move (from opponent's perspective, so negate).
+    infos_after = await pool.analyse(game.board, depth=18, multipv=1)
+    if not infos_after:
+        return None
+    played_cp = -score_to_cp(infos_after[0]["score"].pov(game.board.turn))
+
+    swing = best_cp - played_cp
+    if swing < threshold:
+        return None
+
+    # Generate a quick explanation via LLM.
+    explanation = ""
+    try:
+        prompt = PROMPTS["move_mistake"]
+        opening_name = "unknown opening"
+        if game.opening_node_id:
+            row = await db.fetchrow(
+                "SELECT opening_name FROM opening_nodes WHERE id = $1",
+                game.opening_node_id,
+            )
+            if row and row["opening_name"]:
+                opening_name = row["opening_name"]
+
+        user_text = prompt.user.format(
+            fen=board_before.fen(),
+            played_move=move.uci(),
+            eval_before=f"{best_cp/100:+.1f}",
+            eval_after=f"{played_cp/100:+.1f}",
+            best_move=best_move.uci() if best_move else "unknown",
+            best_pv=" ".join(m.uci() for m in best_pv[:5]),
+            opening_name=opening_name,
+        )
+        client = get_client()
+        explanation = await client.chat(
+            [
+                {"role": "system", "content": prompt.system},
+                {"role": "user", "content": user_text},
+            ],
+            model=settings.ollama_fast_model,
+            temperature=0.3,
+        )
+    except Exception:
+        explanation = (
+            f"That move lost about {swing/100:.1f} pawns worth of advantage. "
+            f"The engine preferred {best_move.uci() if best_move else '?'}."
+        )
+
+    return {
+        "played": move.uci(),
+        "best": best_move.uci() if best_move else None,
+        "swing_cp": swing,
+        "eval_before_cp": best_cp,
+        "eval_after_cp": played_cp,
+        "explanation": explanation,
+        "best_pv": [m.uci() for m in best_pv[:5]],
+    }
+
+
+async def get_hint(game: PracticeGame, pool: StockfishPool) -> dict[str, Any]:
+    """Run Stockfish on the current position and return the best move + line."""
+    infos = await pool.analyse(game.board, depth=20, multipv=1)
+    if not infos or not infos[0].get("pv"):
+        return {"best_uci": None, "pv": [], "cp": 0, "mate": None}
+    pv = [m.uci() for m in infos[0]["pv"][:5]]
+    score = infos[0].get("score")
+    cp = None
+    mate = None
+    if score:
+        pov = score.pov(game.board.turn)
+        m = pov.mate()
+        if m is not None:
+            mate = m
+        else:
+            cp = score_to_cp(pov)
+    return {"best_uci": pv[0], "pv": pv, "cp": cp, "mate": mate}
 
 
 async def play_engine_move(game: PracticeGame, engine: LC0Engine) -> chess.Move:
