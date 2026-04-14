@@ -35,10 +35,53 @@ export interface ChatSource {
   metadata: Record<string, unknown>;
 }
 
+export interface ToolCallTrace {
+  name: string;
+  args: Record<string, unknown>;
+  result: Record<string, unknown>;
+}
+
 export interface ChatResponse {
   answer: string;
   conversation_id: number;
   sources: ChatSource[];
+  tool_trace?: ToolCallTrace[] | null;
+}
+
+// ── Coach widget / page-context ─────────────────────────────────────────
+// Tagged union of "where is the user right now?" payloads. The coach
+// widget passes the active PageContext on every question so the agent
+// can resolve "this card" / "why was that bad?" without the user
+// restating the position.
+export type PageContext =
+  | { page: "practice"; game_id?: number; fen?: string; last_move?: string; eval_cp?: number; opponent?: string; user_color?: string }
+  | { page: "flashcards"; card_id?: number; fen?: string | null; front?: string; back?: string; card_type?: string }
+  | { page: "puzzles"; puzzle_id?: number; fen?: string; rating?: number; themes?: string[] }
+  | { page: "openings"; fen?: string; opening_name?: string | null; eco_code?: string | null; opening_node_id?: number | null }
+  | { page: "insights"; viewing_game_id?: number | null; avg_accuracy?: number }
+  | { page: "progress" }
+  | { page: "dashboard" }
+  | { page: "chat" };
+
+// ── Onboarding ──────────────────────────────────────────────────────────
+export interface OnboardingStep {
+  name: string;
+  label: string;
+  state: "pending" | "running" | "ok" | "error";
+  eta_seconds: number;
+  elapsed_seconds?: number | null;
+  detail?: string | null;
+  error?: string | null;
+}
+
+export interface OnboardingStatus {
+  needs_onboarding: boolean;
+  user_id: number | null;
+  chesscom_username: string | null;
+  in_progress: boolean;
+  completed: boolean;
+  steps: OnboardingStep[];
+  current_step: string | null;
 }
 
 // ── Flashcards ───────────────────────────────────────────────────────────
@@ -96,6 +139,21 @@ export interface Weakness {
   avg_deviation_ply: number | null;
   weakness_score: number;
   weakness_type: string | null;
+}
+
+// ── Opponents ────────────────────────────────────────────────────────────
+export interface RecommendedOpponent {
+  opponent: string;
+  games: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  win_rate: number;
+  peak_rating: number | null;
+  last_played: string | null;
+  training_games: number;
+  has_trained_model: boolean;
+  score: number;
 }
 
 // ── Practice ─────────────────────────────────────────────────────────────

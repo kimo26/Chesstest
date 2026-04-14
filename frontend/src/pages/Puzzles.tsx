@@ -3,6 +3,7 @@ import Chessboard from "../components/Chessboard";
 import CoachChat from "../components/CoachChat";
 import { nextPuzzle, submitAttempt } from "../api/client";
 import { useUser } from "../hooks/useUser";
+import { useCoachPageContext } from "../context/CoachContext";
 import type { Puzzle, PuzzleAttemptResult } from "../types";
 import type { Key } from "chessground/types";
 import { Chess } from "chess.js";
@@ -22,6 +23,19 @@ export default function Puzzles() {
   const [startTime, setStartTime] = useState(0);
   const [movesPlayed, setMovesPlayed] = useState<string[]>([]);
   const chessRef = useRef(new Chess());
+
+  // Publish current puzzle to the persistent coach widget.
+  useCoachPageContext(
+    puzzle
+      ? {
+          page: "puzzles",
+          puzzle_id: puzzle.id,
+          fen: fen || puzzle.fen,
+          rating: puzzle.rating,
+          themes: puzzle.themes,
+        }
+      : { page: "puzzles" }
+  );
 
   const loadPuzzle = useCallback(async () => {
     setPhase("loading");

@@ -6,6 +6,7 @@ import CoachChat from "../components/CoachChat";
 import WinBar from "../components/WinBar";
 import { getOpening, searchOpenings, generateCards, analyse } from "../api/client";
 import { useUser } from "../hooks/useUser";
+import { useCoachPageContext } from "../context/CoachContext";
 import type { OpeningNode, AnalysisLine } from "../types";
 
 interface Arrow {
@@ -28,6 +29,15 @@ export default function OpeningsExplorer() {
   const [engineLines, setEngineLines] = useState<AnalysisLine[]>([]);
   const [analysing, setAnalysing] = useState(false);
   const [showArrows, setShowArrows] = useState(true);
+
+  // Publish the current opening node + FEN to the widget.
+  useCoachPageContext({
+    page: "openings",
+    fen: node?.fen,
+    opening_name: node?.opening_name ?? null,
+    eco_code: node?.eco_code ?? null,
+    opening_node_id: node?.id ?? null,
+  });
 
   const nodeId = params.get("id") ? Number(params.get("id")) : null;
 

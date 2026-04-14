@@ -3,10 +3,12 @@ import { Link } from "react-router-dom";
 import { getDueCards, getWeaknesses } from "../api/client";
 import type { Weakness, Flashcard } from "../types";
 import { useUser } from "../hooks/useUser";
+import { useCoachPageContext } from "../context/CoachContext";
 import WinBar from "../components/WinBar";
 
 export default function Dashboard() {
   const { user, setUser } = useUser();
+  useCoachPageContext({ page: "dashboard" });
   const [weaknesses, setWeaknesses] = useState<Weakness[]>([]);
   const [dueCount, setDueCount] = useState(0);
   const [editing, setEditing] = useState(false);

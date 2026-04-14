@@ -2,10 +2,12 @@ import { useState } from "react";
 import Chessboard from "../components/Chessboard";
 import CoachChat from "../components/CoachChat";
 import { useUser } from "../hooks/useUser";
+import { useCoachPageContext } from "../context/CoachContext";
 
 export default function Chat() {
   const { user } = useUser();
   const [fen, setFen] = useState("");
+  useCoachPageContext({ page: "chat" });
   const [fenInput, setFenInput] = useState("");
   const [convId, setConvId] = useState<number | null>(null);
 

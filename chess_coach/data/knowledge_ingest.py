@@ -8,6 +8,8 @@ Ingests chess theory content beyond just opening descriptions:
    open database.
 3. **Annotated PGN files** — parse ``.pgn`` files with comments and
    store annotated positions as RAG documents.
+4. **Chess theory PDFs** — e.g. "Chess: The Words of Wisdom" — downloaded
+   or loaded from disk, text-extracted with pypdf, chunked, embedded.
 
 All text content is chunked, embedded, and stored in ``rag_documents``
 so the RAG retriever can surface strategy/endgame/middlegame knowledge
@@ -19,6 +21,7 @@ import csv
 import io
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -221,6 +224,187 @@ async def ingest_lichess_puzzles(csv_path: str | Path, limit: int = 50000) -> in
             count += 1
 
     return count
+
+
+# ── PDF ingestion (chess theory books) ──────────────────────────────────
+
+# Preset URLs for chess theory PDFs we know are public-domain / redistributable.
+PDF_PRESETS: dict[str, dict[str, str]] = {
+    "chess-wisdom": {
+        "url": (
+            "https://ia803100.us.archive.org/24/items/ChessMazes2gnv64/"
+            "Chess%20Words%20of%20Wisdom%20-%20The%20Principles%2C%20Methods"
+            "%20and%20Essential%20Knowledge%20of%20Chess.pdf"
+        ),
+        "title": "Chess: The Words of Wisdom",
+        "author": "Mike Henebry",
+        "chunk_level": "strategy",
+    },
+}
+
+
+def _extract_pdf_text(pdf_bytes: bytes) -> list[tuple[int, str]]:
+    """Return ``[(page_num, text), ...]`` for every page of a PDF.
+
+    Pages with <= 50 visible characters are dropped (empty / cover pages).
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    pages: list[tuple[int, str]] = []
+    for i, page in enumerate(reader.pages):
+        try:
+            txt = page.extract_text() or ""
+        except Exception:
+            txt = ""
+        txt = re.sub(r"[ \t]+", " ", txt).strip()
+        if len(txt) >= 50:
+            pages.append((i + 1, txt))
+    return pages
+
+
+def _group_pages(pages: list[tuple[int, str]], target_chars: int = 2500) -> list[dict[str, Any]]:
+    """Group contiguous pages into larger chunks ~``target_chars`` long."""
+    out: list[dict[str, Any]] = []
+    buf: list[str] = []
+    start_page = pages[0][0] if pages else 1
+    size = 0
+    last_page = start_page
+    for pnum, text in pages:
+        if size + len(text) > target_chars and buf:
+            out.append({
+                "start": start_page,
+                "end": last_page,
+                "text": "\n\n".join(buf),
+            })
+            buf = []
+            size = 0
+            start_page = pnum
+        buf.append(text)
+        size += len(text)
+        last_page = pnum
+    if buf:
+        out.append({
+            "start": start_page,
+            "end": last_page,
+            "text": "\n\n".join(buf),
+        })
+    return out
+
+
+async def _download_pdf(url: str, *, cache_dir: Path | None = None) -> bytes:
+    """Download (or load from cache) a PDF file."""
+    if cache_dir is None:
+        cache_dir = Path("./data/pdfs")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Hashed filename so URL changes don't hit stale cache.
+    import hashlib
+    h = hashlib.sha1(url.encode()).hexdigest()[:16]
+    cache_path = cache_dir / f"{h}.pdf"
+    if cache_path.exists():
+        return cache_path.read_bytes()
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+        resp = await client.get(url, headers={"User-Agent": settings.user_agent})
+        resp.raise_for_status()
+        cache_path.write_bytes(resp.content)
+        return resp.content
+
+
+async def ingest_pdf(
+    source: str,
+    *,
+    title: str | None = None,
+    author: str | None = None,
+    chunk_level: str = "strategy",
+    max_chunks: int | None = None,
+) -> int:
+    """Ingest a PDF into the RAG corpus.
+
+    ``source`` may be a URL (http/https) or a local file path. Each chunk
+    of ~2500 chars becomes one ``rag_documents`` row with source_type
+    'pdf_book' so it shows up in retrieval alongside Wikipedia/Wikibooks.
+
+    Returns number of chunks inserted. Prints progress + ETA.
+    """
+    t0 = time.monotonic()
+    if source.startswith(("http://", "https://")):
+        print(f"[pdf] downloading {source}…")
+        pdf_bytes = await _download_pdf(source)
+    else:
+        p = Path(source)
+        if not p.exists():
+            raise FileNotFoundError(f"PDF not found at {source}")
+        pdf_bytes = p.read_bytes()
+
+    print(f"[pdf] extracting text ({len(pdf_bytes)/1e6:.1f} MB)…")
+    pages = _extract_pdf_text(pdf_bytes)
+    if not pages:
+        print("[pdf] no extractable text; skipping.")
+        return 0
+
+    chunks = _group_pages(pages)
+    if max_chunks:
+        chunks = chunks[:max_chunks]
+    print(
+        f"[pdf] {len(pages)} pages -> {len(chunks)} chunks. "
+        f"Embedding (ETA ~{len(chunks)*0.4:.0f}s on local GPU)…"
+    )
+
+    # Short book-level title + attribution.
+    display_title = title or Path(source).stem
+    attribution = f"\n\nSource: {display_title}" + (f" by {author}" if author else "") + "."
+
+    client = get_client()
+    inserted = 0
+    for i, chunk in enumerate(chunks, 1):
+        content = chunk["text"] + attribution
+        # Guard against embedding overflow.
+        if len(content) > 6000:
+            content = content[:6000]
+        embedding = await client.embed_one(content)
+        await db.execute(
+            """
+            INSERT INTO rag_documents (
+                opening_node_id, chunk_level, title, content, embedding,
+                metadata, source_type, source_model
+            ) VALUES (NULL, $1, $2, $3, $4::vector, $5, 'pdf_book', NULL)
+            """,
+            chunk_level,
+            f"{display_title} (pp. {chunk['start']}-{chunk['end']})",
+            content,
+            db.vector_literal(embedding),
+            json.dumps({
+                "source_url": source if source.startswith("http") else None,
+                "source_file": source if not source.startswith("http") else None,
+                "author": author,
+                "page_start": chunk["start"],
+                "page_end": chunk["end"],
+                "chunk_level": chunk_level,
+            }),
+        )
+        inserted += 1
+        if i % 10 == 0 or i == len(chunks):
+            elapsed = time.monotonic() - t0
+            eta = elapsed / i * (len(chunks) - i)
+            print(f"[pdf] {i}/{len(chunks)} chunks embedded (ETA {eta:.0f}s)")
+
+    print(f"[pdf] done: {inserted} chunks in {time.monotonic()-t0:.0f}s")
+    return inserted
+
+
+async def ingest_pdf_preset(name: str) -> int:
+    """Ingest a PDF from the built-in preset list (e.g. 'chess-wisdom')."""
+    preset = PDF_PRESETS.get(name)
+    if preset is None:
+        raise ValueError(
+            f"Unknown PDF preset '{name}'. Options: {list(PDF_PRESETS)}"
+        )
+    return await ingest_pdf(
+        preset["url"],
+        title=preset.get("title"),
+        author=preset.get("author"),
+        chunk_level=preset.get("chunk_level", "strategy"),
+    )
 
 
 # ── Annotated PGN ingestion ─────────────────────────────────────────────

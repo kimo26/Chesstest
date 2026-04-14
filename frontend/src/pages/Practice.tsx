@@ -2,14 +2,16 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import Chessboard from "../components/Chessboard";
 import EvalBar from "../components/EvalBar";
 import CoachChat from "../components/CoachChat";
-import { connectPracticeWS } from "../api/client";
+import { connectPracticeWS, getRecommendedOpponents } from "../api/client";
 import { useUser } from "../hooks/useUser";
+import { useCoachPageContext } from "../context/CoachContext";
 import type {
   GameOverPayload,
   CriticalMoment,
   MistakeEvent,
   HintResponse,
   EvalEvent,
+  RecommendedOpponent,
 } from "../types";
 import type { Key } from "chessground/types";
 import { Chess } from "chess.js";
@@ -30,6 +32,35 @@ export default function Practice() {
   const [opponent, setOpponent] = useState("");
   const [color, setColor] = useState<"white" | "black">("white");
   const [openingMoves, setOpeningMoves] = useState("");
+  const [opponents, setOpponents] = useState<RecommendedOpponent[]>([]);
+  const [useCustomOpp, setUseCustomOpp] = useState(false);
+  const [oppLoading, setOppLoading] = useState(false);
+
+  // Load the recommended opponents dropdown when we enter setup.
+  useEffect(() => {
+    if (phase !== "setup") return;
+    let cancelled = false;
+    setOppLoading(true);
+    getRecommendedOpponents(user.id, 25)
+      .then((r) => {
+        if (cancelled) return;
+        setOpponents(r.opponents);
+        // Pre-select the top-ranked opponent if none chosen.
+        if (r.opponents.length > 0 && !opponent) {
+          setOpponent(r.opponents[0].opponent);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setOpponents([]);
+      })
+      .finally(() => {
+        if (!cancelled) setOppLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, user.id]);
 
   // Game state
   const [fen, setFen] = useState(
@@ -200,6 +231,17 @@ export default function Practice() {
     };
   }, []);
 
+  // Publish current state to the persistent coach widget so questions
+  // like "why was that bad?" know which move / position the user means.
+  useCoachPageContext({
+    page: "practice",
+    fen,
+    last_move: moveList[moveList.length - 1],
+    eval_cp: evalCp ?? undefined,
+    opponent,
+    user_color: color,
+  });
+
   // Formatted move list
   const formattedMoves = moveList
     .map((m, i) => (i % 2 === 0 ? `${Math.floor(i / 2) + 1}. ${m}` : m))
@@ -216,12 +258,44 @@ export default function Practice() {
           </p>
           <div className="form-stack">
             <label>
-              Opponent (Chess.com username)
-              <input
-                value={opponent}
-                onChange={(e) => setOpponent(e.target.value)}
-                placeholder="e.g. hikaru"
-              />
+              Opponent
+              {!useCustomOpp && opponents.length > 0 ? (
+                <select
+                  value={opponent}
+                  onChange={(e) => setOpponent(e.target.value)}
+                >
+                  {opponents.map((o) => (
+                    <option key={o.opponent} value={o.opponent}>
+                      {o.opponent} &nbsp;—&nbsp; {o.wins}W/{o.draws}D/
+                      {o.losses}L ({o.games} games)
+                      {o.has_trained_model ? " ✓" : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={opponent}
+                  onChange={(e) => setOpponent(e.target.value)}
+                  placeholder="e.g. hikaru"
+                />
+              )}
+              <div className="practice__opp-controls text-muted">
+                {oppLoading && "Loading opponents…"}
+                {!oppLoading && opponents.length === 0 && (
+                  <>
+                    No opponents yet. Import your games from Progress first, or{" "}
+                  </>
+                )}
+                {!oppLoading && (
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => setUseCustomOpp((v) => !v)}
+                  >
+                    {useCustomOpp ? "use dropdown" : "enter a custom username"}
+                  </button>
+                )}
+              </div>
             </label>
             <label>
               Your color

@@ -1,7 +1,14 @@
-"""BFS-crawl the Lichess opening explorer to fill ``opening_nodes``."""
+"""BFS-crawl the Lichess opening explorer to fill ``opening_nodes``.
+
+Rough ETA: ``max_children ** max_depth / branching_cut`` API calls at
+``delay`` seconds each. Defaults (depth=12, children=8, min_games=1000,
+delay=0.5s) usually converge in ~15-30 minutes because the min_games
+filter prunes the tree aggressively.
+"""
 from __future__ import annotations
 
 import asyncio
+import time
 
 import typer
 
@@ -21,6 +28,12 @@ def main(
 ) -> None:
     async def run() -> None:
         await db.init_pool()
+        t0 = time.monotonic()
+        typer.echo(
+            f"[lichess] crawling (depth={max_depth}, min_games={min_games}, "
+            f"children={max_children}, delay={delay}s). "
+            f"ETA: ~15-30 min with defaults."
+        )
         try:
             n = await crawl_tree(
                 max_depth=max_depth,
@@ -28,7 +41,7 @@ def main(
                 max_children_per_node=max_children,
                 request_delay_s=delay,
             )
-            typer.echo(f"Crawled {n} positions")
+            typer.echo(f"[lichess] crawled {n} positions in {time.monotonic()-t0:.0f}s")
         finally:
             await db.close_pool()
 

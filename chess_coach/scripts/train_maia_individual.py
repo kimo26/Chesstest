@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import typer
@@ -24,6 +25,14 @@ def main(
 ) -> None:
     async def run() -> None:
         await db.init_pool()
+        t0 = time.monotonic()
+        # On an RTX 5090, Maia-1 fine-tune ~= 8-12 steps/sec at batch 256.
+        # 4000 steps -> ~6-8 min. Plus ~1-2 min data prep. Expect ~10 min.
+        est_sec = int(steps / 10) + 120
+        typer.echo(
+            f"[maia-train] {opponent}: {steps} steps, batch {batch_size}. "
+            f"ETA ~{est_sec//60}m{est_sec%60:02d}s on a modern GPU."
+        )
         try:
             artifacts = await train_individual_model(
                 opponent=opponent,
@@ -34,9 +43,9 @@ def main(
                 min_games=min_games,
             )
             typer.echo(
-                f"Trained maia-individual for {opponent}:\n"
-                f"  games used : {artifacts.games_used}\n"
-                f"  weights    : {artifacts.weights_path}"
+                f"[maia-train] done in {time.monotonic()-t0:.0f}s. "
+                f"games used : {artifacts.games_used}\n"
+                f"             weights    : {artifacts.weights_path}"
             )
         finally:
             await db.close_pool()

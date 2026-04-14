@@ -12,11 +12,13 @@ import {
   trainingStatus,
 } from "../api/client";
 import { useUser } from "../hooks/useUser";
+import { useCoachPageContext } from "../context/CoachContext";
 import type { Weakness } from "../types";
 
 export default function Progress() {
   const { user } = useUser();
   const [weaknesses, setWeaknesses] = useState<Weakness[]>([]);
+  useCoachPageContext({ page: "progress" });
   const [importMsg, setImportMsg] = useState("");
   const [oppInput, setOppInput] = useState("");
   const [trainMsg, setTrainMsg] = useState("");

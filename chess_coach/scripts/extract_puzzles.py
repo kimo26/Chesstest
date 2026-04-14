@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import typer
 
@@ -22,9 +23,20 @@ def main(
     async def run() -> None:
         await db.init_pool()
         pool = StockfishPool(size=stockfish_workers)
+        t0 = time.monotonic()
+        # Rough estimate: 40 moves/game * ~0.5s Stockfish analysis = ~20s/game
+        # with 2 workers -> ~10s/game effective. 50 games -> ~8 min.
+        est_sec = int(limit_games * 10 / max(stockfish_workers, 1))
+        typer.echo(
+            f"[puzzles] extracting from up to {limit_games} games "
+            f"(workers={stockfish_workers}). ETA ~{est_sec//60}m{est_sec%60:02d}s."
+        )
         try:
             n = await extract_puzzles_for_user(user_id, limit_games=limit_games, pool=pool)
-            typer.echo(f"Extracted {n} puzzles for user {user_id}")
+            typer.echo(
+                f"[puzzles] extracted {n} puzzles for user {user_id} "
+                f"in {time.monotonic()-t0:.0f}s"
+            )
         finally:
             await pool.close()
             await db.close_pool()

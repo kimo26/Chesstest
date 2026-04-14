@@ -131,15 +131,28 @@ async def import_user_games(
     chess_com_username: str,
     *,
     months_back: int = 12,
+    collect_opponents: bool = True,
 ) -> int:
     """Fetch the last ``months_back`` months of games for ``chess_com_username``
     and store them as ``user_games`` rows for ``user_id``. Returns count of
-    newly inserted games (duplicates are ignored)."""
+    newly inserted games (duplicates are ignored).
+
+    When ``collect_opponents`` is true, we also queue up the unique
+    opponents we encountered to have their own public game history
+    imported in the background (so the Practice screen can offer them as
+    pre-trained dropdown choices).
+    """
+    import time
+    t0 = time.monotonic()
     client = ChessComClient()
     inserted = 0
     try:
         archives = await client.archives(chess_com_username)
         archives = archives[-months_back:]
+        print(
+            f"[chesscom] {chess_com_username}: {len(archives)} monthly archives "
+            f"(ETA ~{max(1, len(archives)*5)}s)"
+        )
         for archive_url in archives:
             games = await client.month_games(archive_url)
             for g in games:
@@ -207,9 +220,113 @@ async def import_user_games(
                 except Exception:
                     # keep going on bad rows
                     continue
+
+        print(
+            f"[chesscom] {chess_com_username}: +{inserted} games "
+            f"in {time.monotonic()-t0:.1f}s"
+        )
+
+        if collect_opponents:
+            # Find opponents we just imported but haven't trained on yet, and
+            # kick off a best-effort opponent_games import for the top ones.
+            opp_rows = await db.fetch(
+                """
+                SELECT ug.opponent_name, COUNT(*) AS games_vs
+                FROM user_games ug
+                LEFT JOIN opponent_games og ON og.opponent = ug.opponent_name
+                WHERE ug.user_id = $1
+                  AND ug.opponent_name IS NOT NULL
+                  AND ug.source = 'chess_com'
+                GROUP BY ug.opponent_name
+                HAVING COUNT(DISTINCT og.id) = 0
+                ORDER BY COUNT(*) DESC
+                LIMIT 10
+                """,
+                user_id,
+            )
+            if opp_rows:
+                print(
+                    f"[chesscom] auto-collecting opponent games for "
+                    f"{len(opp_rows)} new opponents (ETA ~{len(opp_rows)*10}s)"
+                )
+            for r in opp_rows:
+                opp = r["opponent_name"]
+                try:
+                    await import_opponent_games(opp, months_back=6)
+                except Exception:
+                    continue
         return inserted
     finally:
         await client.aclose()
+
+
+async def recommended_opponents(user_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+    """Return opponents for the practice dropdown, ranked by how much
+    the user *needs* to practice against them.
+
+    Score mix (higher = worse = better to train on):
+      * losses vs this opponent          (weight 1.0)
+      * draws vs this opponent           (weight 0.2)
+      * games played vs this opponent    (weight 0.05, diminishing)
+      * average eval-swing in games      (weight 0.005 per cp, if available)
+
+    We also surface whether we already have fine-tuned weights for the
+    opponent so the UI can render a badge.
+    """
+    rows = await db.fetch(
+        """
+        WITH per_opp AS (
+            SELECT
+                ug.opponent_name                                   AS opponent,
+                COUNT(*)                                           AS games,
+                SUM(CASE WHEN ug.result = 'loss' THEN 1 ELSE 0 END) AS losses,
+                SUM(CASE WHEN ug.result = 'draw' THEN 1 ELSE 0 END) AS draws,
+                SUM(CASE WHEN ug.result = 'win'  THEN 1 ELSE 0 END) AS wins,
+                MAX(ug.opponent_rating)                            AS peak_rating,
+                MAX(ug.played_at)                                  AS last_played
+            FROM user_games ug
+            WHERE ug.user_id = $1
+              AND ug.opponent_name IS NOT NULL
+            GROUP BY ug.opponent_name
+        )
+        SELECT p.opponent,
+               p.games, p.wins, p.draws, p.losses,
+               p.peak_rating,
+               p.last_played,
+               (SELECT COUNT(*) FROM opponent_games og WHERE og.opponent = p.opponent) AS training_games,
+               (SELECT weights_path FROM maia_models m
+                 WHERE m.opponent = p.opponent
+                 ORDER BY trained_at DESC LIMIT 1)                                   AS weights_path
+        FROM per_opp p
+        ORDER BY
+            (p.losses * 1.0 + p.draws * 0.2 + LEAST(p.games, 50) * 0.05) DESC,
+            p.games DESC
+        LIMIT $2
+        """,
+        user_id,
+        limit,
+    )
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        games = r["games"] or 0
+        losses = r["losses"] or 0
+        draws = r["draws"] or 0
+        wins = r["wins"] or 0
+        score = losses * 1.0 + draws * 0.2 + min(games, 50) * 0.05
+        out.append({
+            "opponent": r["opponent"],
+            "games": games,
+            "wins": wins,
+            "draws": draws,
+            "losses": losses,
+            "win_rate": round(wins / games, 3) if games else 0.0,
+            "peak_rating": r["peak_rating"],
+            "last_played": r["last_played"].isoformat() if r["last_played"] else None,
+            "training_games": int(r["training_games"] or 0),
+            "has_trained_model": bool(r["weights_path"]),
+            "score": round(score, 2),
+        })
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -225,11 +342,17 @@ async def import_opponent_games(
     """Pull the last ``months_back`` months of ``opponent``'s games from
     chess.com and store them into ``opponent_games``. Used as training
     material for a maia-individual model."""
+    import time
+    t0 = time.monotonic()
     client = ChessComClient()
     inserted = 0
     try:
         archives = await client.archives(opponent)
         archives = archives[-months_back:]
+        print(
+            f"[chesscom:opp] {opponent}: {len(archives)} archives "
+            f"(ETA ~{max(1, len(archives)*5)}s)"
+        )
         for archive_url in archives:
             games = await client.month_games(archive_url)
             for g in games:
@@ -272,6 +395,10 @@ async def import_opponent_games(
                     inserted += 1
                 except Exception:
                     continue
+        print(
+            f"[chesscom:opp] {opponent}: +{inserted} games "
+            f"in {time.monotonic()-t0:.1f}s"
+        )
         return inserted
     finally:
         await client.aclose()

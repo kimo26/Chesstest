@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Chessboard from "../components/Chessboard";
 import { getDueCards, reviewCard } from "../api/client";
 import { useUser } from "../hooks/useUser";
+import { useCoachPageContext } from "../context/CoachContext";
 import type { Flashcard, ReviewResult } from "../types";
 
 const RATING_LABELS = ["", "Again", "Hard", "Good", "Easy"] as const;
@@ -36,6 +37,20 @@ export default function Flashcards() {
 
   const card = cards[idx] ?? null;
   const remaining = cards.length - idx;
+
+  // Publish the currently-displayed card so "explain this card" works.
+  useCoachPageContext(
+    card
+      ? {
+          page: "flashcards",
+          card_id: card.id,
+          fen: card.fen,
+          front: card.front_text,
+          back: card.back_text,
+          card_type: card.card_type,
+        }
+      : { page: "flashcards" }
+  );
 
   const handleRating = async (rating: number) => {
     if (!card) return;

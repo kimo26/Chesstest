@@ -8,6 +8,7 @@ description the RAG system serves.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import typer
 
@@ -22,9 +23,14 @@ app = typer.Typer(add_completion=False)
 def main() -> None:
     async def run() -> None:
         await db.init_pool()
+        t0 = time.monotonic()
+        # Wikidata SPARQL returns ~400 chess opening items; we then fetch
+        # each Wikipedia extract. With 5 concurrent workers and MediaWiki's
+        # ~200ms/request, total is ~30-90 seconds.
+        typer.echo("[wiki] refreshing Wikipedia opening corpus. ETA ~1-2 min.")
         try:
             n = await refresh_wiki_openings()
-            typer.echo(f"Refreshed {n} Wikipedia articles")
+            typer.echo(f"[wiki] refreshed {n} articles in {time.monotonic()-t0:.0f}s")
         finally:
             await db.close_pool()
 

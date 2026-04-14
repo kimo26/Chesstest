@@ -5,9 +5,12 @@ import type {
   GameAnalysis,
   GameInsights,
   GameOverPayload,
+  OnboardingStatus,
   OpeningNode,
+  PageContext,
   Puzzle,
   PuzzleAttemptResult,
+  RecommendedOpponent,
   ReviewResult,
   Weakness,
 } from "../types";
@@ -35,8 +38,23 @@ export function chat(body: {
   question: string;
   fen?: string | null;
   conversation_id?: number | null;
+  use_agent?: boolean;
+  page_context?: PageContext | null;
 }) {
   return request<ChatResponse>("/chat", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ── Onboarding ──────────────────────────────────────────────────────────
+export const getOnboardingStatus = (userId?: number) =>
+  request<OnboardingStatus>(
+    `/onboarding/status${userId != null ? `?user_id=${userId}` : ""}`
+  );
+
+export function startOnboarding(body: { chesscom_username: string }) {
+  return request<{ user_id: number; started: boolean }>("/onboarding/start", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -175,6 +193,12 @@ export const getCoachingSummary = (userId: number) =>
   request<{ summary: string }>(`/insights/${userId}/coaching-summary`, {
     method: "POST",
   });
+
+// ── Opponents ────────────────────────────────────────────────────────────
+export const getRecommendedOpponents = (userId: number, limit = 20) =>
+  request<{ opponents: RecommendedOpponent[] }>(
+    `/opponents/recommended/${userId}?limit=${limit}`
+  );
 
 // ── Practice WebSocket ───────────────────────────────────────────────────
 export function connectPracticeWS(params: {

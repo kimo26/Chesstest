@@ -24,13 +24,19 @@ def main(
 
     async def run() -> None:
         await db.init_pool()
+        import time
+        t0 = time.monotonic()
+        typer.echo("[eco] loading ECO TSVs. ETA <30s.")
         try:
             entries = load_eco_tsv(directory)
-            typer.echo(f"Loaded {len(entries)} entries from {directory}")
+            typer.echo(f"[eco] loaded {len(entries)} entries from {directory}")
             inserted = await upsert_eco_entries(entries)
-            typer.echo(f"Upserted {inserted} opening_nodes")
+            typer.echo(f"[eco] upserted {inserted} opening_nodes")
             linked = await link_parents()
-            typer.echo(f"Linked {linked} parent/child relationships")
+            typer.echo(
+                f"[eco] linked {linked} parent/child relationships "
+                f"in {time.monotonic()-t0:.1f}s"
+            )
         finally:
             await db.close_pool()
 

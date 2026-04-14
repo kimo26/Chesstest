@@ -4,11 +4,24 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .. import db
 from ..llm import get_client
 from ..maia.lc0_engine import shutdown_all_engines
-from .routes import analyse, chat, flashcards, games, insights, openings, practice, puzzles, training
+from .routes import (
+    analyse,
+    chat,
+    flashcards,
+    games,
+    insights,
+    onboarding,
+    openings,
+    opponents,
+    practice,
+    puzzles,
+    training,
+)
 
 
 @asynccontextmanager
@@ -24,14 +37,25 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Chess Coach", version="0.1.0", lifespan=lifespan)
 
+# Vite dev server runs on :5173; allow it (plus any local origin) to hit the API.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(analyse.router, prefix="/api/analyse", tags=["analyse"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(flashcards.router, prefix="/api/flashcards", tags=["flashcards"])
 app.include_router(games.router, prefix="/api/games", tags=["games"])
 app.include_router(openings.router, prefix="/api/openings", tags=["openings"])
+app.include_router(opponents.router, prefix="/api/opponents", tags=["opponents"])
 app.include_router(practice.router, prefix="/api/practice", tags=["practice"])
 app.include_router(puzzles.router, prefix="/api/puzzles", tags=["puzzles"])
 app.include_router(insights.router, prefix="/api/insights", tags=["insights"])
+app.include_router(onboarding.router, prefix="/api/onboarding", tags=["onboarding"])
 app.include_router(training.router, prefix="/api/training", tags=["training"])
 
 

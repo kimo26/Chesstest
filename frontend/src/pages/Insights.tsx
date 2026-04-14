@@ -22,6 +22,7 @@ import {
   getCoachingSummary,
 } from "../api/client";
 import { useUser } from "../hooks/useUser";
+import { useCoachPageContext } from "../context/CoachContext";
 import type {
   GameInsights,
   GameAnalysis,
@@ -41,6 +42,12 @@ export default function Insights() {
   const [selectedGame, setSelectedGame] = useState<GameAnalysis | null>(null);
   const [selectedMoveIdx, setSelectedMoveIdx] = useState(0);
   const [gameLoading, setGameLoading] = useState(false);
+
+  useCoachPageContext({
+    page: "insights",
+    viewing_game_id: selectedGame?.game_id ?? null,
+    avg_accuracy: insights?.avg_accuracy,
+  });
 
   const refresh = useCallback(async () => {
     setLoading(true);
