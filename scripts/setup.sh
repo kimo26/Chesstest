@@ -24,7 +24,10 @@
 #
 # Flags:
 #   --no-models     Skip Maia + Ollama model downloads (saves ~30 GB + time).
-#   --gpu           Uncomment the NVIDIA block in docker-compose.yml.
+#   --gpu           Explicitly enable automatic GPU detection (default).
+#   --cpu           Skip GPU detection and force CPU mode.
+#   --gpu-backend   Force one backend: auto, nvidia, rocm, vulkan, cpu.
+#   --host-access   Publish API/Ollama/Postgres/Redis on localhost ports.
 #   --yes           Don't prompt — assume "yes" for Docker install.
 #   -h | --help     Show this header and exit.
 
@@ -34,12 +37,30 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 SKIP_MODELS=0
-USE_GPU=0
+USE_GPU=1
+GPU_BACKEND="${GPU_BACKEND:-auto}"
 ASSUME_YES=0
-for arg in "$@"; do
+HOST_ACCESS=0
+while [[ $# -gt 0 ]]; do
+  arg="$1"
   case "$arg" in
     --no-models) SKIP_MODELS=1 ;;
     --gpu)       USE_GPU=1 ;;
+    --cpu)
+      USE_GPU=0
+      GPU_BACKEND=cpu
+      ;;
+    --gpu-backend)
+      shift
+      [[ $# -gt 0 ]] || { echo "Missing value for --gpu-backend" >&2; exit 2; }
+      USE_GPU=1
+      GPU_BACKEND="$1"
+      ;;
+    --gpu-backend=*)
+      USE_GPU=1
+      GPU_BACKEND="${arg#*=}"
+      ;;
+    --host-access) HOST_ACCESS=1 ;;
     --yes|-y)    ASSUME_YES=1 ;;
     -h|--help)
       sed -n '2,30p' "$0"
@@ -47,7 +68,14 @@ for arg in "$@"; do
       ;;
     *) echo "Unknown flag: $arg" >&2; exit 2 ;;
   esac
+  shift
 done
+
+if [[ "${CHESS_COACH_TEST_ARGS_ONLY:-0}" = "1" ]]; then
+  printf 'USE_GPU=%s\n' "$USE_GPU"
+  printf 'GPU_BACKEND=%s\n' "$GPU_BACKEND"
+  exit 0
+fi
 
 step() { echo -e "\n\033[1;34m▶ $*\033[0m"; }
 ok()   { echo -e "  \033[32m✓\033[0m $*"; }
@@ -55,6 +83,9 @@ add()  { echo -e "  \033[36m↓\033[0m $*"; }
 warn() { echo -e "  \033[33m!\033[0m $*"; }
 die()  { echo -e "  \033[31m✗\033[0m $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/compose_common.sh"
 
 echo "============================================================"
 echo "  Chess Coach — Docker installer"
@@ -180,32 +211,19 @@ if ! docker info >/dev/null 2>&1; then
   die "Open a new shell (for the 'docker' group) or start Docker Desktop, then re-run."
 fi
 
+ensure_gpu_requirements
+compose_setup_files
+configure_dynamic_host_ports "Port checks"
+
 # ──────────────────────────────────────────────────────────────────────
 #  2. GPU toggle for lc0 / ollama
 # ──────────────────────────────────────────────────────────────────────
 if [[ $USE_GPU = 1 ]]; then
-  step "2/5 GPU compose override"
-  if grep -q "# deploy:" docker-compose.yml; then
-    add "uncommenting NVIDIA deploy block"
-    # Uncomment the deploy: … block under ollama (exactly the 8 lines
-    # that start with "    # ").
-    python3 - <<'PY'
-import re, pathlib
-p = pathlib.Path("docker-compose.yml")
-src = p.read_text()
-src = re.sub(
-    r"(?m)^    # (deploy:|  resources:|    reservations:|      devices:|        - driver: nvidia|          count: all|          capabilities: \[gpu\])",
-    r"    \1", src,
-)
-p.write_text(src)
-PY
-    ok "GPU block enabled — install the NVIDIA Container Toolkit if you haven't."
-  else
-    ok "GPU block already active"
-  fi
+  step "2/5 GPU"
+  print_gpu_backend_status
 else
   step "2/5 GPU"
-  ok "CPU mode (pass --gpu to opt in)"
+  print_gpu_backend_status
 fi
 
 # ──────────────────────────────────────────────────────────────────────
@@ -238,19 +256,24 @@ fi
 # ──────────────────────────────────────────────────────────────────────
 step "4/5 docker compose build + up"
 add "docker compose build (first run will build lc0 — up to ~10 min)"
-docker compose build
+compose_cmd build
 add "docker compose up -d"
-docker compose up -d
+compose_up_with_recovery
 
 # Postgres healthcheck wait.
 add "waiting for postgres to become healthy"
+POSTGRES_HEALTHY=0
 for _ in $(seq 1 60); do
   if [[ "$(docker inspect -f '{{.State.Health.Status}}' chess_postgres 2>/dev/null)" = "healthy" ]]; then
     ok "postgres healthy"
+    POSTGRES_HEALTHY=1
     break
   fi
   sleep 2
 done
+if [[ $POSTGRES_HEALTHY = 0 ]]; then
+  die "Postgres did not become healthy after 120s. Check: docker compose logs postgres"
+fi
 
 # ──────────────────────────────────────────────────────────────────────
 #  5. Ollama model pulls (into the container volume)
@@ -258,16 +281,30 @@ done
 if [[ $SKIP_MODELS = 0 ]]; then
   step "5/5 Ollama model pulls"
   # Wait for ollama to respond.
+  OLLAMA_READY=0
   for _ in $(seq 1 30); do
-    if curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then break; fi
+    if [[ $HOST_ACCESS = 1 ]]; then
+      if curl -fsS "http://localhost:${HOST_OLLAMA_PORT}/api/tags" >/dev/null 2>&1; then
+        OLLAMA_READY=1
+        break
+      fi
+    else
+      if compose_cmd exec -T ollama ollama list >/dev/null 2>&1; then
+        OLLAMA_READY=1
+        break
+      fi
+    fi
     sleep 2
   done
+  if [[ $OLLAMA_READY = 0 ]]; then
+    die "Ollama did not become ready after 60s. Check: docker compose logs ollama"
+  fi
   for model in qwen2.5:32b-instruct qwen2.5:14b-instruct bge-m3; do
-    if docker compose exec -T ollama ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -Fx "$model" >/dev/null; then
+    if compose_cmd exec -T ollama ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -Fx "$model" >/dev/null; then
       ok "model $model already pulled"
     else
       add "ollama pull $model (can take a while — many GB)"
-      docker compose exec -T ollama ollama pull "$model"
+      compose_cmd exec -T ollama ollama pull "$model"
     fi
   done
 else
@@ -281,7 +318,13 @@ echo ""
 echo "      docker compose ps"
 echo ""
 echo "  Launch the app:       ./scripts/start.sh"
-echo "  Open the web UI:      http://localhost:5173"
+echo "  Open the web UI:      http://localhost:${HOST_FRONTEND_PORT}"
+if [[ $HOST_ACCESS = 1 ]]; then
+  echo "  API URL:              http://localhost:${HOST_API_PORT}"
+  echo "  Ollama URL:           http://localhost:${HOST_OLLAMA_PORT}"
+  echo "  Postgres host port:   ${HOST_POSTGRES_PORT}"
+  echo "  Redis host port:      ${HOST_REDIS_PORT}"
+fi
 echo ""
 echo "  First visit? The web app will walk you through the"
 echo "  Chess.com-username onboarding wizard with live ETAs."

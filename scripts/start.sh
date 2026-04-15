@@ -18,15 +18,61 @@ warn() { echo -e "  \033[33m!\033[0m $*"; }
 die()  { echo -e "  \033[31m✗\033[0m $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Ask before running `sudo systemctl restart docker`. In non-interactive
-# shells (CI, piped stdin) default to yes — this is a recovery path, not a
-# destructive one, and CI environments can't answer prompts.
-confirm_restart_docker() {
-  if [[ ! -t 0 ]]; then return 0; fi
-  local reply
-  read -r -p "  ? Restart the Docker daemon now to recreate its iptables chains? (needs sudo) [Y/n] " reply
-  [[ -z "$reply" || "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]
-}
+ASSUME_YES=0
+HOST_ACCESS=0
+USE_GPU=1
+GPU_BACKEND="${GPU_BACKEND:-auto}"
+FOLLOW=0
+REBUILD=0
+
+while [[ $# -gt 0 ]]; do
+  arg="$1"
+  case "$arg" in
+    -f|--follow)     FOLLOW=1 ;;
+    -b|--rebuild)    REBUILD=1 ;;
+    --gpu)           USE_GPU=1 ;;
+    --cpu)
+      USE_GPU=0
+      GPU_BACKEND=cpu
+      ;;
+    --gpu-backend)
+      shift
+      [[ $# -gt 0 ]] || die "Missing value for --gpu-backend"
+      USE_GPU=1
+      GPU_BACKEND="$1"
+      ;;
+    --gpu-backend=*)
+      USE_GPU=1
+      GPU_BACKEND="${arg#*=}"
+      ;;
+    --host-access)   HOST_ACCESS=1 ;;
+    --yes|-y)        ASSUME_YES=1 ;;
+    -h|--help)
+      sed -n '2,10p' "$0"
+      echo ""
+      echo "Usage: ./scripts/start.sh [-f|--follow] [-b|--rebuild] [--gpu] [--cpu] [--gpu-backend <auto|nvidia|rocm|vulkan|cpu>] [--host-access] [--yes]"
+      echo "  --gpu          explicitly enable automatic GPU detection (default)"
+      echo "  --cpu          skip GPU detection and force CPU mode"
+      echo "  --gpu-backend  force one backend: auto, nvidia, rocm, vulkan, cpu"
+      echo "  --host-access  publish API/Ollama/Postgres/Redis on localhost ports"
+      echo "  --yes          auto-confirm Docker daemon restart during recovery"
+      exit 0
+      ;;
+    *)
+      die "Unknown flag: $arg"
+      ;;
+  esac
+  shift
+done
+
+if [[ "${CHESS_COACH_TEST_ARGS_ONLY:-0}" = "1" ]]; then
+  printf 'USE_GPU=%s\n' "$USE_GPU"
+  printf 'GPU_BACKEND=%s\n' "$GPU_BACKEND"
+  exit 0
+fi
+
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/compose_common.sh"
 
 if ! have docker; then
   die "Docker is not installed — run ./scripts/setup.sh first."
@@ -38,69 +84,30 @@ if ! docker info >/dev/null 2>&1; then
   die "Cannot talk to the Docker daemon. Start Docker Desktop or open a new shell (if you were just added to the 'docker' group)."
 fi
 
-FOLLOW=0
-REBUILD=0
-for arg in "$@"; do
-  case "$arg" in
-    -f|--follow)  FOLLOW=1 ;;
-    -b|--rebuild) REBUILD=1 ;;
-    -h|--help)
-      sed -n '2,10p' "$0"
-      echo ""
-      echo "Usage: ./scripts/start.sh [-f|--follow] [-b|--rebuild]"
-      exit 0 ;;
-  esac
-done
+ensure_gpu_requirements
+compose_setup_files
+print_gpu_backend_status
+configure_dynamic_host_ports "resolving host ports"
 
 if [[ $REBUILD = 1 ]]; then
   step "docker compose build"
-  docker compose build
+  compose_cmd build
 fi
-
-# `docker compose up` can fail with:
-#   "iptables: Chain 'DOCKER-ISOLATION-STAGE-2' does not exist"
-# when the host's iptables state has been clobbered (ufw/firewalld reload,
-# nftables/iptables-legacy backend switch, manual `iptables -F`, etc.).
-# Restarting the Docker daemon makes it recreate its chains. We try that
-# automatically, once, if we detect the signature.
-compose_up() {
-  docker compose up -d 2>&1 | tee /tmp/chesscoach-up.log
-  # tee exits 0 if either side of the pipe did; check compose's exit via PIPESTATUS.
-  return "${PIPESTATUS[0]}"
-}
 
 step "docker compose up -d"
-if ! compose_up; then
-  if grep -q "DOCKER-ISOLATION-STAGE" /tmp/chesscoach-up.log 2>/dev/null \
-     || grep -qi "iptables failed"        /tmp/chesscoach-up.log 2>/dev/null; then
-    warn "Docker's iptables chains look broken — this usually happens after"
-    warn "a firewall reload (ufw/firewalld) or an iptables backend switch."
-    if have systemctl && confirm_restart_docker; then
-      step "restarting the Docker daemon (sudo)"
-      sudo systemctl restart docker
-      # Give the daemon a moment to recreate its networks.
-      for _ in $(seq 1 15); do
-        if docker info >/dev/null 2>&1; then break; fi
-        sleep 1
-      done
-      step "docker compose up -d (retry)"
-      docker compose down --remove-orphans >/dev/null 2>&1 || true
-      docker network prune -f >/dev/null 2>&1 || true
-      docker compose up -d
-    else
-      die "Run 'sudo systemctl restart docker' (and re-run this script) to recover."
-    fi
-  else
-    die "docker compose up failed — see the output above."
-  fi
-fi
-rm -f /tmp/chesscoach-up.log
+compose_up_with_recovery
 
-ok "Web UI:  http://localhost:5173"
-ok "API:    http://localhost:8000"
-ok "Ollama: http://localhost:11434"
+ok "Web UI:  http://localhost:${HOST_FRONTEND_PORT}"
+if [[ $HOST_ACCESS = 1 ]]; then
+  ok "API:    http://localhost:${HOST_API_PORT}"
+  ok "Ollama: http://localhost:${HOST_OLLAMA_PORT}"
+  ok "Postgres host port: ${HOST_POSTGRES_PORT}"
+  ok "Redis host port:    ${HOST_REDIS_PORT}"
+else
+  ok "API/Ollama/Postgres/Redis are internal-only. Re-run with --host-access to expose them on localhost."
+fi
 
 if [[ $FOLLOW = 1 ]]; then
   step "tailing logs (Ctrl-C to detach — services stay up)"
-  docker compose logs -f
+  compose_cmd logs -f
 fi

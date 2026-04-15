@@ -16,34 +16,34 @@ progress.
 
 ## Quickstart (non-programmer edition)
 
+**First time:**
+
 ```bash
 git clone <this repo>
 cd Chesstest
-./scripts/setup.sh      # installs Docker if missing (with your permission), then brings the stack up
-./scripts/start.sh      # `docker compose up -d` — the idempotent version
+./scripts/setup.sh
 ```
 
-Open `http://localhost:5173`. The first launch drops you on
-`/onboarding`; type your Chess.com username, click **Start**, and watch
-each step tick green.
+**Later:**
 
-### Docker is the only supported install target
+```bash
+./scripts/start.sh
+```
+
+Open the URL printed by the script, usually `http://localhost:5173`.
+First visit: onboarding. Enter your Chess.com username and follow the
+steps.
+
+The scripts can install Docker on Linux with your permission, or point
+you to Docker Desktop on macOS.
+
+### Docker only
 
 The entire app — Postgres (pgvector), Redis, Ollama, the FastAPI
-backend, and the Vite frontend — runs in containers defined by
+backend, and the Vite frontend runs in containers defined by
 `docker-compose.yml`. There is no bare-metal path; nothing gets
 installed into your system Python or your home directory beyond the
 repo itself, Docker, and a `./models/` cache for the Maia weights.
-
-**If Docker is missing**, `setup.sh` tells you and asks for permission
-before installing it:
-
-```
-! Docker is not installed on this machine.
-    Chess Coach runs its database, cache, LLM runtime, API, and
-    frontend as Docker containers — there is no bare-metal path.
-  ? Install Docker Engine now via the official get.docker.com script? (needs sudo) [y/N]
-```
 
 - **Linux:** runs Docker's official `get.docker.com` convenience
   script (needs `sudo`), enables the daemon via systemd, and adds you
@@ -57,18 +57,24 @@ Non-interactive environments (CI, piped stdin) must pass `--yes` to
 accept the prompts; otherwise the script exits rather than silently
 installing system-level software.
 
-### GPU mode
+### GPU (optional)
 
-For a faster Maia + Ollama on an NVIDIA box:
+Most people can ignore this. `setup.sh` and `start.sh` automatically try
+the best supported Ollama backend and fall back to CPU if needed.
+
+Optional flags:
 
 ```bash
-./scripts/setup.sh --gpu
+./scripts/start.sh --cpu
+./scripts/start.sh --gpu-backend nvidia
 ```
 
-This uncomments the `deploy:` block under the `ollama` service in
-`docker-compose.yml`. You'll need the [NVIDIA Container
-Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-on the host.
+- `--cpu` skips GPU detection and forces CPU mode
+- `--gpu-backend ...` is mainly for debugging or advanced setups
+- `--gpu` is still accepted, but no longer needed for the normal path
+
+If GPU acceleration gives you trouble, use `./scripts/start.sh --cpu`
+and keep going. Troubleshooting below covers the advanced host details.
 
 ---
 
@@ -186,6 +192,13 @@ defaults for the containerised networking (service names, not
 the `api` service — or by creating a `.env` file at the repo root,
 which Compose picks up automatically.
 
+Host port publishing policy:
+- Base `docker-compose.yml` exposes only the frontend on the host.
+- `docker-compose.host-access.yml` (enabled via `--host-access`) exposes
+  API/Ollama/Postgres/Redis on loopback for local tooling.
+- If `.env.host-access.local` exists, both scripts auto-load it when
+  `--host-access` is used.
+
 | Variable | Default (in compose) | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | `postgresql://chess:chess@postgres:5432/chess_coach` | Postgres DSN. |
@@ -241,14 +254,17 @@ Every script prints its ETA before starting.
    macOS → Docker Desktop (optionally via `brew install --cask docker`).
 2. **Compose plugin check.** Installs `docker-compose-plugin` on
    Linux if missing (also prompted).
-3. **GPU toggle** (only with `--gpu`) uncomments the NVIDIA `deploy:`
-   block under the `ollama` service in `docker-compose.yml`.
+3. **GPU mode** auto-detects or forces one of the backend-specific Ollama
+   overrides: NVIDIA, ROCm, Vulkan, or CPU. `--cpu` disables GPU
+   detection; `--gpu-backend ...` forces a specific path.
 4. **Host-mounted assets:** downloads `maia-1900.pb.gz` into `./models/`
    and clones `lichess-org/chess-openings` into `./data/` — both are
    skipped if already present.
 5. **`docker compose build`** — caches the lc0 compile across runs.
 6. **`docker compose up -d`** — on first boot, Postgres auto-applies
-   every file in `./sql/` via `/docker-entrypoint-initdb.d/`.
+   every file in `./sql/` via `/docker-entrypoint-initdb.d/`. By
+   default, only the frontend is host-published; pass `--host-access`
+   to expose API/Ollama/Postgres/Redis on localhost.
 7. **Ollama model pulls:** `ollama pull qwen2.5:32b-instruct`,
    `qwen2.5:14b-instruct`, `bge-m3` — skipped if `ollama list` shows
    them already.
@@ -266,9 +282,41 @@ needs doing.
 - **"Cannot talk to the Docker daemon"** — you were just added to the
   `docker` group; open a new shell or run `newgrp docker`. On macOS
   make sure Docker Desktop is running.
-- **Ports 5432 / 6379 / 8000 / 5173 / 11434 in use** — stop the
-  conflicting service or change the `ports:` mapping in
-  `docker-compose.yml`.
+- **GPU mode picked the wrong backend for your host** — force one
+  explicitly while debugging:
+  - `./scripts/start.sh --gpu-backend nvidia`
+  - `./scripts/start.sh --gpu-backend rocm`
+  - `./scripts/start.sh --gpu-backend vulkan`
+  - `./scripts/start.sh --cpu`
+- **`nvidia-container-cli ... libnvidia-ml.so.1`** — the NVIDIA host
+  runtime is missing/broken.
+  - Fastest fix: `./scripts/start.sh --cpu`
+  - NVIDIA fix: install/reinstall
+    [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html),
+    then retry `./scripts/start.sh` or `./scripts/start.sh --gpu-backend nvidia`.
+- **ROCm / Vulkan device errors** — the required device nodes are missing
+  or blocked on the host.
+  - ROCm needs `/dev/kfd` and `/dev/dri`
+  - Vulkan needs `/dev/dri`
+  - Fastest fix: `./scripts/start.sh --cpu`
+- **Port conflicts**
+  - Default mode exposes only the frontend host port.
+  - In `--host-access` mode, API/Ollama/Postgres/Redis are also
+    published on localhost.
+  - In both modes, scripts auto-pick nearby free host ports and print
+    the selected values.
+- **`DOCKER-ISOLATION-STAGE-2` / iptables chain missing** — Docker lost
+  its bridge firewall chains (often after firewall/backend changes).
+  Recover with:
+  ```bash
+  sudo systemctl restart docker
+  docker compose down --remove-orphans || true
+  docker network prune -f
+  ./scripts/start.sh
+  ```
+  `setup.sh` and `start.sh` both include one automatic recovery attempt,
+  but host firewall policy is machine-specific and intentionally not
+  hardcoded in this repo.
 - **Ollama pulls are slow / fail** — they're many GB. Retry with
   `docker compose exec ollama ollama pull qwen2.5:32b-instruct`.
 - **Rebuild after `pyproject.toml` change** — `./scripts/start.sh -b`
