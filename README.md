@@ -19,40 +19,56 @@ progress.
 ```bash
 git clone <this repo>
 cd Chesstest
-./scripts/setup.sh      # idempotent; installs only what's missing
-./scripts/start.sh      # boots API + UI, prints the URL
+./scripts/setup.sh      # installs Docker if missing (with your permission), then brings the stack up
+./scripts/start.sh      # `docker compose up -d` — the idempotent version
 ```
 
-Open the URL it prints (usually `http://localhost:5173`). The first
-launch drops you on `/onboarding`; type your Chess.com username, click
-**Start**, and watch each step tick green.
+Open `http://localhost:5173`. The first launch drops you on
+`/onboarding`; type your Chess.com username, click **Start**, and watch
+each step tick green.
 
-Already have Postgres/Stockfish/Ollama/lc0 on this machine? `setup.sh`
-detects them and skips. Don't? It installs them via your package
-manager (apt / brew / dnf), pulls the required Ollama models, downloads
-the Maia-1 weights, and provisions the database.
+### Docker is the only supported install target
 
-### Optional: Docker Compose path
+The entire app — Postgres (pgvector), Redis, Ollama, the FastAPI
+backend, and the Vite frontend — runs in containers defined by
+`docker-compose.yml`. There is no bare-metal path; nothing gets
+installed into your system Python or your home directory beyond the
+repo itself, Docker, and a `./models/` cache for the Maia weights.
 
-Don't want system-level Postgres/Redis/Ollama? Run setup with Docker:
+**If Docker is missing**, `setup.sh` tells you and asks for permission
+before installing it:
 
-```bash
-./scripts/setup.sh --docker
+```
+! Docker is not installed on this machine.
+    Chess Coach runs its database, cache, LLM runtime, API, and
+    frontend as Docker containers — there is no bare-metal path.
+  ? Install Docker Engine now via the official get.docker.com script? (needs sudo) [y/N]
 ```
 
-This writes a `docker-compose.yml` with `pgvector/pgvector:pg16`,
-`redis:7-alpine`, and `ollama/ollama:latest`, and brings them up. Only
-Stockfish, Python, Node, and lc0 stay native.
+- **Linux:** runs Docker's official `get.docker.com` convenience
+  script (needs `sudo`), enables the daemon via systemd, and adds you
+  to the `docker` group.
+- **macOS:** points you at Docker Desktop; if Homebrew is present you
+  can say "yes" to `brew install --cask docker`.
+- **Decline the prompt** and `setup.sh` exits cleanly — no fallback,
+  no half-configured state. Install Docker your own way and re-run.
 
-### GPU build of lc0
+Non-interactive environments (CI, piped stdin) must pass `--yes` to
+accept the prompts; otherwise the script exits rather than silently
+installing system-level software.
 
-For a faster Maia in Practice:
+### GPU mode
+
+For a faster Maia + Ollama on an NVIDIA box:
 
 ```bash
 ./scripts/setup.sh --gpu
 ```
 
-(lc0 is built from source with CUDA if `nvidia-smi` is present.)
+This uncomments the `deploy:` block under the `ollama` service in
+`docker-compose.yml`. You'll need the [NVIDIA Container
+Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+on the host.
 
 ---
 
@@ -74,29 +90,22 @@ For a faster Maia in Practice:
 
 ## Architecture
 
+Everything inside the dotted box runs as a Docker container. Maia
+weights and ECO TSVs are host-mounted from `./models/` and `./data/`.
+
 ```
-            ┌────────────────────────────────────────────┐
-            │                React (Vite)                │
-            │  /dashboard  /practice  /puzzles  /…       │
-            │  CoachProvider  ──►  <CoachWidget/>        │
-            └────────────────┬───────────────────────────┘
-                             │ /api/*  (vite proxy)
-                             ▼
-            ┌────────────────────────────────────────────┐
-            │        FastAPI (chess_coach.api)           │
-            │  routes: practice puzzles flashcards       │
-            │          openings chat insights onboarding │
-            │          opponents training                │
-            │  agents/coach.py  ←─ tool-calling coach    │
-            └───┬──────────┬──────────┬──────────┬───────┘
-                │          │          │          │
-                ▼          ▼          ▼          ▼
-           Postgres+    Stockfish    Ollama     lc0 +
-           pgvector      (UCI)      (chat+emb)  Maia-1
-                │
-                └── rag_messages  games  puzzles  flashcards
-                    knowledge_chunks  opening_nodes
-                    onboarding_state
+ ┌─ docker compose ──────────────────────────────────────────────┐
+ │                                                               │
+ │   frontend (vite)  ─► api (FastAPI)  ─► ollama (qwen+bge-m3)  │
+ │        │                 │   │                                │
+ │        │                 │   └──► postgres (pgvector)         │
+ │        │                 └─► redis                            │
+ │        │              stockfish + lc0 built into the api img  │
+ │        │                                                      │
+ │        └── browser <─── localhost:5173                        │
+ │                                                               │
+ └───────────────────────────────────────────────────────────────┘
+             ./models (Maia weights)  ./data (ECO, wiki, pdfs)
 ```
 
 - **Postgres 16 + pgvector + pg_trgm + ltree** — games, puzzles,
@@ -171,97 +180,102 @@ a few minutes per opponent.
 
 ## Configuration
 
-`chess_coach/config.py` reads env vars:
+All env vars are set for you in `docker-compose.yml` with sensible
+defaults for the containerised networking (service names, not
+`localhost`). Override any of them by adding an `environment:` line to
+the `api` service — or by creating a `.env` file at the repo root,
+which Compose picks up automatically.
 
-| Variable | Default | Purpose |
+| Variable | Default (in compose) | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | `postgresql://chess_coach@localhost/chess_coach` | Postgres connection. |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama daemon. |
-| `COACH_MODEL` | `qwen2.5:32b` | Main coach model (tool calling). |
-| `DESC_MODEL` | `qwen2.5:14b` | Opening descriptions / coaching summaries. |
+| `DATABASE_URL` | `postgresql://chess:chess@postgres:5432/chess_coach` | Postgres DSN. |
+| `REDIS_URL` | `redis://redis:6379/0` | Redis DSN. |
+| `OLLAMA_URL` | `http://ollama:11434` | Ollama daemon. |
+| `COACH_MODEL` | `qwen2.5:32b-instruct` | Tool-calling coach model. |
+| `DESC_MODEL` | `qwen2.5:14b-instruct` | Opening descriptions / summaries. |
 | `EMBED_MODEL` | `bge-m3` | Embeddings for RAG. |
-| `STOCKFISH_PATH` | `stockfish` | Stockfish binary. |
-| `LC0_PATH` | `lc0` | lc0 binary. |
-| `MAIA_WEIGHTS` | `./data/maia/maia-1900.pb.gz` | Maia-1 weights. |
-| `MAIA_MODELS_DIR` | `./data/maia/individuals/` | Per-opponent fine-tunes. |
-
-Put overrides in a `.env` file at the repo root.
+| `STOCKFISH_PATH` | `stockfish` | Stockfish (baked into the api image). |
+| `LC0_PATH` | `lc0` | lc0 (baked into the api image). |
+| `MAIA_WEIGHTS` | `/app/models/maia-1900.pb.gz` | Host-mounted Maia weights. |
+| `MAIA_MODELS_DIR` | `/app/models/individuals` | Per-opponent fine-tunes. |
 
 ---
 
 ## Manual pipelines (optional)
 
-Everything the onboarding wizard runs can also be run by hand:
+Everything the onboarding wizard runs can also be run by hand, via
+`docker compose exec`:
 
 ```bash
 # ECO + Lichess opening tree
-python -m chess_coach.scripts.load_eco                  # ~30 s
-python -m chess_coach.scripts.crawl_lichess             # ~15–30 min
-python -m chess_coach.scripts.refresh_wiki              # ~1–2 min
-python -m chess_coach.scripts.generate_descriptions     # dynamic ETA
+docker compose exec api python -m chess_coach.scripts.load_eco              # ~30 s
+docker compose exec api python -m chess_coach.scripts.crawl_lichess         # ~15–30 min
+docker compose exec api python -m chess_coach.scripts.refresh_wiki          # ~1–2 min
+docker compose exec api python -m chess_coach.scripts.generate_descriptions # dynamic ETA
 
 # Knowledge base (wiki + PDFs + ECO)
-python -m chess_coach.scripts.ingest_knowledge all
+docker compose exec api python -m chess_coach.scripts.ingest_knowledge all
 # or just the PDF preset:
-python -m chess_coach.scripts.ingest_knowledge pdf-preset chess-wisdom
+docker compose exec api python -m chess_coach.scripts.ingest_knowledge pdf-preset chess-wisdom
 
 # Puzzle database
-python -m chess_coach.scripts.extract_puzzles           # dynamic ETA
+docker compose exec api python -m chess_coach.scripts.extract_puzzles       # dynamic ETA
 
 # Import your games (also pulls your top 10 opponents)
-python -c "import asyncio; from chess_coach.data.chesscom_importer import import_user_games; \
+docker compose exec api python -c "import asyncio; from chess_coach.data.chesscom_importer import import_user_games; \
            asyncio.run(import_user_games(USER_ID, 'your_chesscom_handle', \
                                          months_back=12, collect_opponents=True))"
 
 # Train a Maia-individual on a specific opponent
-python -m chess_coach.scripts.train_maia_individual <opponent_handle>
+docker compose exec api python -m chess_coach.scripts.train_maia_individual <opponent_handle>
 ```
 
 Every script prints its ETA before starting.
 
 ---
 
-## What `setup.sh` installs (and skips)
+## What `setup.sh` does (and skips)
 
-For each item, `setup.sh` probes with the right tool (`dpkg -s`,
-`brew list --formula`, `rpm -q`, `command -v`, `ollama list`) before
-installing. A second `./scripts/setup.sh` run should print "✓ already
-installed" for every step.
+1. **Docker check.** `command -v docker`. Missing? Prompt before
+   installing. Linux → `get.docker.com` script + `usermod -aG docker`.
+   macOS → Docker Desktop (optionally via `brew install --cask docker`).
+2. **Compose plugin check.** Installs `docker-compose-plugin` on
+   Linux if missing (also prompted).
+3. **GPU toggle** (only with `--gpu`) uncomments the NVIDIA `deploy:`
+   block under the `ollama` service in `docker-compose.yml`.
+4. **Host-mounted assets:** downloads `maia-1900.pb.gz` into `./models/`
+   and clones `lichess-org/chess-openings` into `./data/` — both are
+   skipped if already present.
+5. **`docker compose build`** — caches the lc0 compile across runs.
+6. **`docker compose up -d`** — on first boot, Postgres auto-applies
+   every file in `./sql/` via `/docker-entrypoint-initdb.d/`.
+7. **Ollama model pulls:** `ollama pull qwen2.5:32b-instruct`,
+   `qwen2.5:14b-instruct`, `bge-m3` — skipped if `ollama list` shows
+   them already.
 
-- System: `postgresql-16`, `postgresql-16-pgvector`, `redis-server`,
-  `stockfish`, `python3.11 + venv`, `nodejs + npm`, `curl`, `git`,
-  `build-essential`, `zstd`.
-- **Python**: creates `.venv`, runs `pip install -e .`.
-- **Node**: runs `npm install` only if `package-lock.json` is newer
-  than `frontend/node_modules`.
-- **Ollama**: installs daemon if missing; pulls `qwen2.5:32b`,
-  `qwen2.5:14b`, `bge-m3` only if not already in `ollama list`.
-- **lc0**: builds from source (CPU, or CUDA with `--gpu`) only if
-  `lc0` isn't on `$PATH`.
-- **Maia weights**: downloads `maia-1900.pb.gz` only if absent.
-- **Postgres**: creates role + database only if missing; applies
-  `sql/001_schema.sql`, `sql/002_knowledge_base.sql`,
-  `sql/003_coach_memory.sql` (all `IF NOT EXISTS`).
+Re-running is safe: every step prints "✓ already present" when nothing
+needs doing.
 
 ---
 
 ## Troubleshooting
 
-- **Ollama daemon not running** — `ollama serve &` or
-  `systemctl --user start ollama`. `start.sh` does this for you on
-  boot.
-- **Postgres peer-auth rejection** — the setup script creates a role
-  matching `$USER`. If you ran it as root, `sudo -u postgres
-  createuser $USER`.
-- **`vector type does not exist`** — pgvector isn't installed. On
-  Debian/Ubuntu: `sudo apt install postgresql-16-pgvector`. Or use
-  `--docker`.
-- **lc0 build fails** — install `libopenblas-dev meson ninja-build
-  cmake` and re-run `setup.sh`.
-- **Port conflict on 8000 / 5173** — edit `scripts/start.sh`.
-- **CORS errors in dev** — the API has `allow_origins=["*"]` and Vite
-  proxies `/api`, so this shouldn't happen; check you're hitting
-  `localhost:5173`, not `127.0.0.1`.
+- **"Docker is not installed"** — say "yes" to the prompt, or install
+  Docker yourself ([docs](https://docs.docker.com/engine/install/))
+  and re-run `./scripts/setup.sh`.
+- **"Cannot talk to the Docker daemon"** — you were just added to the
+  `docker` group; open a new shell or run `newgrp docker`. On macOS
+  make sure Docker Desktop is running.
+- **Ports 5432 / 6379 / 8000 / 5173 / 11434 in use** — stop the
+  conflicting service or change the `ports:` mapping in
+  `docker-compose.yml`.
+- **Ollama pulls are slow / fail** — they're many GB. Retry with
+  `docker compose exec ollama ollama pull qwen2.5:32b-instruct`.
+- **Rebuild after `pyproject.toml` change** — `./scripts/start.sh -b`
+  or `docker compose build api`.
+- **Wipe everything** — `docker compose down -v` drops the named
+  volumes (`pgdata`, `redisdata`, `ollama`) and you're back to a clean
+  slate. `./models/` and `./data/` are preserved.
 
 ---
 
@@ -270,7 +284,7 @@ installed" for every step.
 **Add a RAG source.** Drop a PDF in `data/pdfs/` and:
 
 ```bash
-python -m chess_coach.scripts.ingest_knowledge pdf path/to/file.pdf
+docker compose exec api python -m chess_coach.scripts.ingest_knowledge pdf /app/data/pdfs/yourfile.pdf
 ```
 
 Or add an entry to `PDF_PRESETS` in
